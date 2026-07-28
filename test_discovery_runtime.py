@@ -61,6 +61,8 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("Do not reveal secrets", prompt)
         self.assertIn("OpenAI Codex", prompt)
         self.assertIn("Discovery Scout —", prompt)
+        self.assertIn("Image URL:", prompt)
+        self.assertIn("public HTTPS URL", prompt)
 
     def test_clean_output_removes_session_marker(self):
         raw = "Discovery Scout — ready\n\nsession_id: 20260728_abc"
