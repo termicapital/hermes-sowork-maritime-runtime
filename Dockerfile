@@ -2,6 +2,7 @@ FROM nousresearch/hermes-agent@sha256:d887ef6e9ee71f9f3700d23a01816ae38ac5b74436
 
 USER root
 COPY discovery_runtime.py /opt/discovery-runtime/discovery_runtime.py
+COPY openrouter_safe_tool.py /opt/hermes/tools/openrouter_safe_tool.py
 COPY install_readonly_toolset.py /opt/discovery-runtime/install_readonly_toolset.py
 COPY --chmod=0755 verify-runtime.sh /opt/discovery-runtime/verify-runtime.sh
 RUN /opt/hermes/.venv/bin/python /opt/discovery-runtime/install_readonly_toolset.py /opt/hermes/toolsets.py

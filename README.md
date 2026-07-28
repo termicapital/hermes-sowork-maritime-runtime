@@ -9,6 +9,7 @@ Generic, credential-free Maritime runtime for a Hermes-based SoWork group agent.
 - Only allowlisted SoWork user IDs and explicit `/scout`, `@DiscoveryScout`, or `Discovery Scout:` invocations execute the agent.
 - The Hermes child receives a strict non-secret environment allowlist and the runtime refuses to start if `/opt/data/.env` exists.
 - Shared skills are exposed through a custom read-only toolset (`skills_list` and `skill_view`, never `skill_manage`).
+- OpenRouter requests use a bounded model allowlist and a loopback-only parent proxy; the Hermes child never receives the key.
 - Terminal, file, code execution, delegation, and browser toolsets are excluded from the shared surface.
 - Inference is bounded to two workers; public HTTP concurrency, body size, and socket duration are capped.
 - State and deduplication live on Maritime's persistent `/opt/data` volume; interrupted workers become retryable.

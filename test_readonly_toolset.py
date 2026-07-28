@@ -29,6 +29,8 @@ class ReadonlyToolsetInstallerTests(unittest.TestCase):
         block = patched.split('"skills_readonly"', 1)[1].split('    "skills": {', 1)[0]
         self.assertIn('"skills_list", "skill_view"', block)
         self.assertNotIn("skill_manage", block)
+        self.assertIn('"openrouter_safe"', patched)
+        self.assertIn('"openrouter_query"', patched)
 
     def test_patch_is_idempotent(self):
         source = '''TOOLSETS = {

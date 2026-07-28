@@ -11,14 +11,17 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import contextlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import textwrap
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -344,7 +347,7 @@ def agent_toolsets() -> str:
     deliberately excluded; they could expose process credentials or escape this
     restriction. Research uses the URL-safety-enforced web toolset.
     """
-    return "web,image_gen,vision,skills_readonly,todo"
+    return "web,image_gen,vision,skills_readonly,openrouter_safe,todo"
 
 
 def run_agent(config: Config, prompt: str) -> str:
@@ -446,6 +449,68 @@ def poll_once(
     return queued
 
 
+OPENROUTER_ALLOWED_MODELS = {
+    "openai/gpt-4o-mini",
+    "google/gemini-2.5-flash",
+    "anthropic/claude-sonnet-4",
+    "openrouter/auto",
+}
+
+
+def validate_openrouter_payload(payload: dict[str, Any]) -> tuple[str, str, int]:
+    model = str(payload.get("model", "")).strip()
+    prompt = str(payload.get("prompt", "")).strip()
+    try:
+        max_tokens = int(payload.get("max_tokens", 600))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid max_tokens") from exc
+    if model not in OPENROUTER_ALLOWED_MODELS:
+        raise ValueError("model is not approved")
+    if not prompt or len(prompt) > 12000:
+        raise ValueError("prompt must contain 1 to 12,000 characters")
+    if max_tokens < 1 or max_tokens > 1200:
+        raise ValueError("max_tokens must be between 1 and 1200")
+    return model, prompt, max_tokens
+
+
+def call_openrouter(payload: dict[str, Any]) -> dict[str, Any]:
+    model, prompt, max_tokens = validate_openrouter_payload(payload)
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("OpenRouter is not configured")
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://maritime.sh",
+            "X-Title": "Suhail Discovery Scout",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        raw_response = response.read(1_000_001)
+    if len(raw_response) > 1_000_000:
+        raise RuntimeError("OpenRouter response exceeded 1 MB")
+    result = json.loads(raw_response.decode("utf-8"))
+    choices = result.get("choices") or []
+    content = ((choices[0].get("message") or {}).get("content") if choices else "") or ""
+    if isinstance(content, list):
+        content = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    usage = result.get("usage") or {}
+    return {
+        "model": redact_outbound(str(result.get("model") or model))[:200],
+        "text": redact_outbound(str(content))[:16000],
+        "usage": {k: int(v) for k, v in usage.items() if k in {"prompt_tokens", "completion_tokens", "total_tokens"} and isinstance(v, int)},
+    }
+
+
 def webhook_action(_raw_body: bytes) -> str:
     """Public webhooks are wake signals only; their body never reaches the LLM."""
     return "poll"
@@ -503,6 +568,11 @@ class LimitedThreadingHTTPServer(ThreadingHTTPServer):
 class RuntimeServer:
     def __init__(self, config: Config):
         self.config = config
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        self.openrouter_proxy_token = secrets.token_urlsafe(48)
+        token_path = config.data_dir / "openrouter-proxy-token"
+        token_path.write_text(self.openrouter_proxy_token, encoding="utf-8")
+        token_path.chmod(0o600)
         self.store = Store(config.data_dir / "state.sqlite3")
         self.executor = BoundedExecutor(config.max_workers)
         self.wake_event = threading.Event()
@@ -533,6 +603,31 @@ class RuntimeServer:
                 })
 
             def do_POST(self) -> None:
+                if self.path == "/internal/openrouter/query":
+                    supplied_token = self.headers.get("X-Discovery-Internal-Token", "")
+                    if (
+                        self.client_address[0] not in {"127.0.0.1", "::1"}
+                        or not hmac.compare_digest(supplied_token, outer.openrouter_proxy_token)
+                    ):
+                        self._json(403, {"error": "forbidden"})
+                        return
+                    try:
+                        declared = parse_content_length(
+                            self.headers.get("Content-Length"), maximum=32768
+                        )
+                        raw = self.rfile.read(declared) if declared else b"{}"
+                        payload = json.loads(raw.decode("utf-8"))
+                        if not isinstance(payload, dict):
+                            raise ValueError("JSON object required")
+                        result = call_openrouter(payload)
+                    except ValueError as exc:
+                        self._json(400, {"error": str(exc)})
+                        return
+                    except Exception:
+                        self._json(502, {"error": "OpenRouter request failed"})
+                        return
+                    self._json(200, result)
+                    return
                 if self.path != "/webhook":
                     self._json(404, {"error": "not found"})
                     return

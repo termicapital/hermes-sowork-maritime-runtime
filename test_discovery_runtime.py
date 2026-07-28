@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 RUNTIME = Path(__file__).with_name("discovery_runtime.py")
 
@@ -75,7 +76,7 @@ class RuntimeContractTests(unittest.TestCase):
     def test_group_agent_toolsets_exclude_raw_secret_surfaces(self):
         toolsets = set(self.runtime.agent_toolsets().split(","))
         self.assertFalse({"terminal", "file", "code_execution", "delegation", "browser", "skills"} & toolsets)
-        self.assertTrue({"web", "image_gen", "vision", "skills_readonly"} <= toolsets)
+        self.assertTrue({"web", "image_gen", "vision", "skills_readonly", "openrouter_safe"} <= toolsets)
 
     def test_child_environment_removes_credentials(self):
         env = {
@@ -148,6 +149,74 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertFalse(executor.try_submit(lambda: None))
         release.set()
         executor.shutdown(wait=True)
+
+    def test_openrouter_payload_is_allowlisted_and_bounded(self):
+        valid = self.runtime.validate_openrouter_payload({
+            "model": "openai/gpt-4o-mini", "prompt": "test", "max_tokens": 20,
+        })
+        self.assertEqual(valid, ("openai/gpt-4o-mini", "test", 20))
+        for payload in (
+            {"model": "unauthorized/model", "prompt": "test"},
+            {"model": "openai/gpt-4o-mini", "prompt": "x" * 12001},
+            {"model": "openai/gpt-4o-mini", "prompt": "test", "max_tokens": 5000},
+        ):
+            with self.assertRaises(ValueError):
+                self.runtime.validate_openrouter_payload(payload)
+
+    def test_openrouter_parent_bounds_and_redacts_response_fields(self):
+        response_payload = {
+            "model": "m" * 25000,
+            "choices": [{"message": {"content": "x" * 25000}}],
+            "usage": {"prompt_tokens": 1, "extra": 999},
+        }
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, limit):
+                self.limit = limit
+                return self.runtime_json
+
+        response = Response()
+        response.runtime_json = self.runtime.json.dumps(response_payload).encode()
+        with (
+            patch.dict(self.runtime.os.environ, {"OPENROUTER_API_KEY": "test-key"}),
+            patch.object(self.runtime.urllib.request, "urlopen", return_value=response),
+        ):
+            result = self.runtime.call_openrouter({
+                "model": "openai/gpt-4o-mini", "prompt": "test", "max_tokens": 10,
+            })
+        self.assertEqual(response.limit, 1_000_001)
+        self.assertEqual(len(result["model"]), 200)
+        self.assertEqual(len(result["text"]), 16000)
+        self.assertEqual(result["usage"], {"prompt_tokens": 1})
+
+    def test_internal_openrouter_endpoint_requires_runtime_capability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.runtime.Config(
+                channel_id="c", allowed_user_ids={"u"}, enabled=False,
+                data_dir=Path(tmp), port=0,
+            )
+            server = self.runtime.RuntimeServer(config)
+            thread = self.runtime.threading.Thread(target=server.httpd.serve_forever, daemon=True)
+            thread.start()
+            port = server.httpd.server_address[1]
+            body = b'{"model":"unauthorized/model","prompt":"test"}'
+            request = self.runtime.urllib.request.Request(
+                f"http://127.0.0.1:{port}/internal/openrouter/query",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(self.runtime.urllib.error.HTTPError) as denied:
+                self.runtime.urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(denied.exception.code, 403)
+            request.add_header("X-Discovery-Internal-Token", server.openrouter_proxy_token)
+            with self.assertRaises(self.runtime.urllib.error.HTTPError) as validated:
+                self.runtime.urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(validated.exception.code, 400)
+            server.httpd.shutdown()
+            server.httpd.server_close()
+            server.executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ set -eu
 test ! -e /opt/data/.env
 PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python - <<'PY'
 from toolsets import resolve_toolset
-assert resolve_toolset('skills_readonly') == ['skills_list', 'skill_view']
+assert set(resolve_toolset('skills_readonly')) == {'skills_list', 'skill_view'}
+assert set(resolve_toolset('openrouter_safe')) == {'openrouter_query'}
 print('skills_readonly', resolve_toolset('skills_readonly'))
 PY
 /opt/hermes/.venv/bin/python - <<'PY'

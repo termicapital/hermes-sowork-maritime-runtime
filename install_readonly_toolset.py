@@ -12,12 +12,22 @@ BLOCK = '''    "skills_readonly": {
         "includes": []
     },
 
+    "openrouter_safe": {
+        "description": "Restricted OpenRouter queries through a parent-held credential",
+        "tools": ["openrouter_query"],
+        "includes": []
+    },
+
 '''
 
 
 def patch_source(source: str) -> str:
-    if '"skills_readonly"' in source:
+    has_readonly = '"skills_readonly"' in source
+    has_openrouter = '"openrouter_safe"' in source
+    if has_readonly and has_openrouter:
         return source
+    if has_readonly or has_openrouter:
+        raise RuntimeError("Hermes toolsets.py has a partial Discovery runtime patch")
     if MARKER not in source:
         raise RuntimeError("Pinned Hermes toolsets.py no longer has the expected skills marker")
     return source.replace(MARKER, BLOCK + MARKER, 1)
