@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import sys
 import tempfile
@@ -49,6 +50,8 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(cfg.allowed_user_ids, {"u1", "u2"})
         self.assertTrue(cfg.enabled)
         self.assertEqual(cfg.max_workers, 2)
+        self.assertEqual(cfg.data_dir, Path("/data/hermes/discovery-runtime"))
+        self.assertEqual(cfg.project_dir, Path("/data/hermes/discovery-scout"))
         self.assertNotIn("SOWORK_API_TOKEN", repr(cfg))
 
     def test_prompt_enforces_shared_surface_boundary(self):
@@ -81,8 +84,8 @@ class RuntimeContractTests(unittest.TestCase):
     def test_child_environment_removes_credentials(self):
         env = {
             "PATH": "/bin",
-            "HOME": "/opt/data",
-            "HERMES_HOME": "/opt/data",
+            "HOME": "/data/hermes",
+            "HERMES_HOME": "/data/hermes",
             "SOWORK_API_TOKEN": "sw_secret",
             "HERMES_CODEX_AUTH_B64": "encoded-secret",
             "OPENROUTER_API_KEY": "sk-or-secret",
@@ -93,7 +96,7 @@ class RuntimeContractTests(unittest.TestCase):
             "SAFE_SETTING": "yes",
         }
         child = self.runtime.sanitized_child_env(env)
-        self.assertEqual(child, {"PATH": "/bin", "HOME": "/opt/data", "HERMES_HOME": "/opt/data"})
+        self.assertEqual(child, {"PATH": "/bin", "HOME": "/data/hermes", "HERMES_HOME": "/data/hermes"})
 
     def test_outbound_redaction_blocks_exact_and_pattern_secrets(self):
         env = {"SOWORK_API_TOKEN": "sw_actual_secret_123", "OPENROUTER_API_KEY": "sk-or-v1-abcdef1234567890"}
@@ -115,7 +118,7 @@ class RuntimeContractTests(unittest.TestCase):
             store = self.runtime.Store(Path(tmp) / "state.sqlite3")
             message = self.message("/scout recover me")
             self.assertTrue(store.record(message, "processing"))
-            with store.connect() as conn:
+            with contextlib.closing(store.connect()) as conn, conn:
                 conn.execute("UPDATE messages SET updated_at=0 WHERE id='m1'")
             self.assertEqual(store.recover_stale(60), 1)
             self.assertTrue(store.claim_retry("m1"))

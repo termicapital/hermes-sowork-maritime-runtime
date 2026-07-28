@@ -49,8 +49,8 @@ class Config:
     enabled: bool = False
     poll_interval: int = 30
     port: int = 8765
-    data_dir: Path = Path("/opt/data/discovery-runtime")
-    project_dir: Path = Path("/opt/data/discovery-scout")
+    data_dir: Path = Path("/data/hermes/discovery-runtime")
+    project_dir: Path = Path("/data/hermes/discovery-scout")
     hermes_cmd: str = "hermes"
     worker_timeout: int = 1800
     max_workers: int = 2
@@ -60,6 +60,7 @@ class Config:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
         source = dict(os.environ if env is None else env)
+        home = Path(source.get("HERMES_HOME", "/data/hermes"))
         ids = {item.strip() for item in source.get("SOWORK_ALLOWED_USER_IDS", "").split(",") if item.strip()}
         return cls(
             channel_id=source.get("SOWORK_CHANNEL_ID", "").strip(),
@@ -68,8 +69,8 @@ class Config:
             enabled=source.get("DISCOVERY_BRIDGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
             poll_interval=max(10, int(source.get("DISCOVERY_POLL_INTERVAL", "30"))),
             port=int(source.get("PORT", source.get("DISCOVERY_PORT", "8765"))),
-            data_dir=Path(source.get("DISCOVERY_DATA_DIR", "/opt/data/discovery-runtime")),
-            project_dir=Path(source.get("DISCOVERY_PROJECT_DIR", "/opt/data/discovery-scout")),
+            data_dir=Path(source.get("DISCOVERY_DATA_DIR", str(home / "discovery-runtime"))),
+            project_dir=Path(source.get("DISCOVERY_PROJECT_DIR", str(home / "discovery-scout"))),
             hermes_cmd=source.get("HERMES_CMD", "hermes"),
             worker_timeout=int(source.get("DISCOVERY_WORKER_TIMEOUT", "1800")),
             max_workers=max(1, min(4, int(source.get("DISCOVERY_MAX_WORKERS", "2")))),
@@ -89,7 +90,7 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._lock = threading.Lock()
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             conn.execute("PRAGMA journal_mode=DELETE")
             conn.execute(
                 """
@@ -111,16 +112,16 @@ class Store:
         return sqlite3.connect(self.path, timeout=30)
 
     def initialized(self) -> bool:
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             return conn.execute("SELECT 1 FROM meta WHERE key='initialized'").fetchone() is not None
 
     def set_initialized(self) -> None:
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('initialized',?)", (str(int(time.time())),))
 
     def record(self, message: dict[str, Any], status: str) -> bool:
         sender = message.get("sender") or {}
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO messages(id,created_at,sender_id,sender_name,text,status,updated_at)
@@ -135,7 +136,7 @@ class Store:
             return cursor.rowcount == 1
 
     def set_status(self, message_id: str, status: str, error: str | None = None) -> None:
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             conn.execute(
                 "UPDATE messages SET status=?,error=?,updated_at=? WHERE id=?",
                 (status, error, int(time.time()), message_id),
@@ -143,7 +144,7 @@ class Store:
 
     def recover_stale(self, max_age: int) -> int:
         cutoff = int(time.time()) - max_age
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             cursor = conn.execute(
                 """
                 UPDATE messages
@@ -155,7 +156,7 @@ class Store:
             return cursor.rowcount
 
     def claim_retry(self, message_id: str) -> bool:
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             cursor = conn.execute(
                 """
                 UPDATE messages SET status='queued',error=NULL,updated_at=?
@@ -166,7 +167,7 @@ class Store:
             return cursor.rowcount == 1
 
     def counts(self) -> dict[str, int]:
-        with self.connect() as conn:
+        with contextlib.closing(self.connect()) as conn, conn:
             return dict(conn.execute("SELECT status,COUNT(*) FROM messages GROUP BY status").fetchall())
 
 
@@ -179,7 +180,7 @@ def log(config: Config, message: str) -> None:
         fh.write(line + "\n")
 
 
-def ensure_no_dotenv(home: Path = Path("/opt/data")) -> None:
+def ensure_no_dotenv(home: Path = Path("/data/hermes")) -> None:
     dotenv = home / ".env"
     if dotenv.exists():
         raise RuntimeError(
@@ -187,7 +188,7 @@ def ensure_no_dotenv(home: Path = Path("/opt/data")) -> None:
         )
 
 
-def install_codex_auth(env: Mapping[str, str] | None = None, home: Path = Path("/opt/data")) -> bool:
+def install_codex_auth(env: Mapping[str, str] | None = None, home: Path = Path("/data/hermes")) -> bool:
     source = os.environ if env is None else env
     encoded = source.get("HERMES_CODEX_AUTH_B64", "").strip()
     if not encoded:
@@ -666,7 +667,7 @@ class RuntimeServer:
 def main() -> int:
     config = Config.from_env()
     config.validate()
-    hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+    hermes_home = Path(os.environ.get("HERMES_HOME", "/data/hermes"))
     ensure_no_dotenv(hermes_home)
     install_codex_auth(home=hermes_home)
     config.data_dir.mkdir(parents=True, exist_ok=True)

@@ -7,12 +7,14 @@ Generic, credential-free Maritime runtime for a Hermes-based SoWork group agent.
 - Public `/webhook` payloads are wake signals only and never enter an LLM prompt.
 - The runtime polls one configured SoWork conversation using an encrypted Maritime secret.
 - Only allowlisted SoWork user IDs and explicit `/scout`, `@DiscoveryScout`, or `Discovery Scout:` invocations execute the agent.
-- The Hermes child receives a strict non-secret environment allowlist and the runtime refuses to start if `/opt/data/.env` exists.
+- The Hermes child receives a strict non-secret environment allowlist and the runtime refuses to start if `/data/hermes/.env` exists.
 - Shared skills are exposed through a custom read-only toolset (`skills_list` and `skill_view`, never `skill_manage`).
 - OpenRouter requests use a bounded model allowlist and a loopback-only parent proxy; the Hermes child never receives the key.
 - Terminal, file, code execution, delegation, and browser toolsets are excluded from the shared surface.
 - Inference is bounded to two workers; public HTTP concurrency, body size, and socket duration are capped.
-- State and deduplication live on Maritime's persistent `/opt/data` volume; interrupted workers become retryable.
+- State, skills, authentication, and deduplication live directly under `/data/hermes`, Maritime's persistent volume. The inherited anonymous `/opt/data` Docker volume is deliberately unused because it is replaced on redeploy.
+- The entrypoint creates only `/data/hermes`, assigns it to UID/GID 10000, and explicitly drops from Maritime's root launcher to that account before starting Python.
+- Interrupted workers become retryable without duplicating live queued futures.
 - No credentials or customer identity are committed to this repository.
 - Private skills, persona, config, and OAuth state are synchronized separately after deployment.
 

@@ -2,7 +2,10 @@
 set -eu
 
 /opt/hermes/.venv/bin/hermes --version
-test ! -e /opt/data/.env
+test "$(id -u)" = "10000"
+test "${HERMES_HOME:-}" = "/data/hermes"
+test -d /data/hermes
+test ! -e /data/hermes/.env
 PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python - <<'PY'
 from toolsets import resolve_toolset
 assert set(resolve_toolset('skills_readonly')) == {'skills_list', 'skill_view'}

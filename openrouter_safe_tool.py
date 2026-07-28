@@ -10,7 +10,7 @@ from typing import Any
 from tools.registry import registry
 
 ENDPOINT = "http://127.0.0.1:8765/internal/openrouter/query"
-TOKEN_PATH = Path("/opt/data/discovery-runtime/openrouter-proxy-token")
+TOKEN_PATH = Path("/data/hermes/discovery-runtime/openrouter-proxy-token")
 
 
 def openrouter_query(model: str, prompt: str, max_tokens: int = 600) -> dict[str, Any]:
