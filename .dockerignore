@@ -1,0 +1,6 @@
+.git
+__pycache__
+*.pyc
+test_*.py
+maritime.json
+.maritime
