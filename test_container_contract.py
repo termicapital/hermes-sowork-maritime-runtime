@@ -9,7 +9,9 @@ class ContainerContractTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text()
         entrypoint = (ROOT / "entrypoint.sh").read_text()
         self.assertIn("ENV HERMES_HOME=/data/hermes", dockerfile)
-        self.assertIn("ENV HERMES_WRITE_SAFE_ROOT=/data/hermes/discovery-scout", dockerfile)
+        self.assertIn(
+            "ENV HERMES_WRITE_SAFE_ROOT=/data/hermes/discovery-scout", dockerfile
+        )
         self.assertNotIn("ln -s /data/hermes /opt/data", dockerfile)
         self.assertIn('ENTRYPOINT ["/opt/discovery-runtime/entrypoint.sh"]', dockerfile)
         self.assertIn("PERSISTENT_HOME=/data/hermes", entrypoint)

@@ -16,35 +16,39 @@ class ReadonlyToolsetInstallerTests(unittest.TestCase):
         spec.loader.exec_module(cls.module)
 
     def test_adds_readonly_toolset_without_skill_manage(self):
-        source = '''TOOLSETS = {
+        source = """TOOLSETS = {
     "skills": {
         "description": "Manage skills",
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
 }
-'''
+"""
         patched = self.module.patch_source(source)
         self.assertIn('"skills_readonly"', patched)
         block = patched.split('"skills_readonly"', 1)[1].split('    "skills": {', 1)[0]
         self.assertIn('"skills_list", "skill_view"', block)
         self.assertNotIn("skill_manage", block)
         self.assertIn('"openrouter_safe"', patched)
-        self.assertIn('"openrouter_query"', patched)
+        self.assertIn('"openrouter_catalog", "openrouter_generate"', patched)
+        self.assertIn('"firecrawl_safe"', patched)
+        self.assertIn('"perplexity_safe"', patched)
+        self.assertIn('"xai_safe"', patched)
+        self.assertIn('"github_safe"', patched)
         self.assertIn('"asana_safe"', patched)
         self.assertIn('"asana_read"', patched)
         self.assertIn('"sowork_meetings_safe"', patched)
         self.assertIn('"sowork_meetings_read"', patched)
 
     def test_patch_is_idempotent(self):
-        source = '''TOOLSETS = {
+        source = """TOOLSETS = {
     "skills": {
         "description": "Manage skills",
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
 }
-'''
+"""
         once = self.module.patch_source(source)
         self.assertEqual(self.module.patch_source(once), once)
 

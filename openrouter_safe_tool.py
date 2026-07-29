@@ -1,82 +1,108 @@
 #!/usr/bin/env python3
-"""Restricted OpenRouter tool: no credential is present in the Hermes child."""
+"""Dynamic-catalog OpenRouter child tools with parent-enforced human selection."""
+
 from __future__ import annotations
 
-import json
-import urllib.request
-from pathlib import Path
-from typing import Any
-
 from tools.registry import registry
-
-ENDPOINT = "http://127.0.0.1:8765/internal/openrouter/query"
-TOKEN_PATH = Path("/data/hermes/discovery-runtime/openrouter-proxy-token")
+from safe_proxy_client import MAX_RESULT_CHARS, proxy
 
 
-def openrouter_query(model: str, prompt: str, max_tokens: int = 600) -> dict[str, Any]:
-    model = str(model).strip()
-    prompt = str(prompt).strip()
-    max_tokens = int(max_tokens)
-    if not model or not prompt:
-        raise ValueError("model and prompt are required")
-    if len(prompt) > 12000:
-        raise ValueError("prompt exceeds 12,000 characters")
-    if max_tokens < 1 or max_tokens > 1200:
-        raise ValueError("max_tokens must be between 1 and 1200")
-    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens}).encode("utf-8")
-    token = TOKEN_PATH.read_text(encoding="utf-8").strip()
-    if len(token) < 32:
-        raise RuntimeError("OpenRouter proxy capability is unavailable")
-    request = urllib.request.Request(
-        ENDPOINT,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Discovery-Internal-Token": token,
-        },
+def openrouter_catalog(
+    query: str = "", output_modality: str = "", limit: int = 50
+) -> str:
+    """List the bounded live catalog; does not require a selected model."""
+    if len(query) > 200 or output_modality not in {
+        "",
+        "text",
+        "image",
+        "audio",
+        "embeddings",
+    }:
+        raise ValueError("invalid catalog filter")
+    if not 1 <= int(limit) <= 100:
+        raise ValueError("catalog limit must be 1..100")
+    return proxy(
+        "/internal/openrouter/catalog",
+        {"query": query, "output_modality": output_modality, "limit": int(limit)},
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        raw_response = response.read(25_001)
-    if len(raw_response) > 25_000:
-        raise RuntimeError("OpenRouter proxy response exceeded 25 KB")
-    return json.loads(raw_response.decode("utf-8"))
 
 
-SCHEMA = {
-    "name": "openrouter_query",
-    "description": (
-        "Run a bounded prompt through one approved OpenRouter model. The API key "
-        "stays in the parent service and is never exposed to this agent. Use for "
-        "explicit model comparisons or when the requester asks for OpenRouter."
-    ),
+def openrouter_generate(
+    kind: str,
+    model: str,
+    prompt: str,
+    max_tokens: int = 1200,
+    voice: str = "alloy",
+    format: str = "mp3",
+) -> str:
+    """Generate only when the parent bound this run to the exact model ID."""
+    if kind not in {"text", "image", "audio"} or not model or not prompt:
+        raise ValueError("kind, exact model, and prompt are required")
+    if len(prompt) > 12000 or not 1 <= int(max_tokens) <= 4000:
+        raise ValueError("generation bounds exceeded")
+    return proxy(
+        "/internal/openrouter/generate",
+        {
+            "kind": kind,
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": int(max_tokens),
+            "voice": voice,
+            "format": format,
+        },
+        timeout=300,
+    )
+
+
+CATALOG_SCHEMA = {
+    "name": "openrouter_catalog",
+    "description": "List the bounded LIVE OpenRouter catalog (IDs, names, modalities, pricing). Before generation: call this, ask the HUMAN to reply with one exact catalog model ID, then STOP. Do not generate in the same turn.",
     "parameters": {
         "type": "object",
         "properties": {
-            "model": {
+            "query": {"type": "string", "maxLength": 200},
+            "output_modality": {
                 "type": "string",
-                "enum": [
-                    "openai/gpt-4o-mini",
-                    "google/gemini-2.5-flash",
-                    "anthropic/claude-sonnet-4",
-                    "openrouter/auto",
-                ],
+                "enum": ["", "text", "image", "audio", "embeddings"],
             },
-            "prompt": {"type": "string", "maxLength": 12000},
-            "max_tokens": {"type": "integer", "minimum": 1, "maximum": 1200, "default": 600},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
         },
-        "required": ["model", "prompt"],
         "additionalProperties": False,
     },
 }
-
+GENERATE_SCHEMA = {
+    "name": "openrouter_generate",
+    "description": "Text, dedicated image, or streaming audio generation. HARD GATE: works only after a later triggering HUMAN message contained this exact live catalog model ID. Never infer/substitute a model or use same-turn approval.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["text", "image", "audio"]},
+            "model": {"type": "string", "maxLength": 200},
+            "prompt": {"type": "string", "maxLength": 12000},
+            "max_tokens": {"type": "integer", "minimum": 1, "maximum": 4000},
+            "voice": {"type": "string", "maxLength": 40},
+            "format": {
+                "type": "string",
+                "enum": ["mp3", "wav", "ogg", "flac", "opus", "pcm16"],
+            },
+        },
+        "required": ["kind", "model", "prompt"],
+        "additionalProperties": False,
+    },
+}
 registry.register(
-    name="openrouter_query",
+    name="openrouter_catalog",
     toolset="openrouter_safe",
-    schema=SCHEMA,
-    handler=lambda args, **_kwargs: openrouter_query(
-        args.get("model", ""), args.get("prompt", ""), args.get("max_tokens", 600)
-    ),
+    schema=CATALOG_SCHEMA,
+    handler=lambda args, **_: openrouter_catalog(**args),
+    emoji="📚",
+    max_result_size_chars=MAX_RESULT_CHARS,
+)
+registry.register(
+    name="openrouter_generate",
+    toolset="openrouter_safe",
+    schema=GENERATE_SCHEMA,
+    handler=lambda args, **_: openrouter_generate(**args),
     emoji="🔀",
-    max_result_size_chars=20_000,
+    max_result_size_chars=MAX_RESULT_CHARS,
 )

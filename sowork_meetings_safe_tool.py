@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """Restricted read-only SoWork Meeting Library tool."""
+
 from __future__ import annotations
 
-import json
 import re
-import urllib.request
-from pathlib import Path
-
 from tools.registry import registry
+from safe_proxy_client import proxy
 
-ENDPOINT = "http://127.0.0.1:8765/internal/sowork/meetings/read"
-TOKEN_PATH = Path("/data/hermes/discovery-runtime/openrouter-proxy-token")
+
 ACTIONS = {"list_meetings", "search_meetings", "get_meeting"}
 DIGEST_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 KINDS = {"all", "title", "note", "transcript", "chat"}
@@ -45,7 +42,7 @@ def sowork_meetings_read(
     if limit < 1 or limit > 50:
         raise ValueError("limit must be between 1 and 50")
 
-    body = json.dumps({
+    payload = {
         "action": action,
         "digest_id": digest_id,
         "query": query,
@@ -53,25 +50,8 @@ def sowork_meetings_read(
         "since": since,
         "until": until,
         "limit": limit,
-    }).encode("utf-8")
-    capability = TOKEN_PATH.read_text(encoding="utf-8").strip()
-    if len(capability) < 32:
-        raise RuntimeError("SoWork meetings proxy capability is unavailable")
-    request = urllib.request.Request(
-        ENDPOINT,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Discovery-Internal-Token": capability,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        raw_response = response.read(250_001)
-    if len(raw_response) > 250_000:
-        raise RuntimeError("SoWork meetings proxy response exceeded 250 KB")
-    payload = json.loads(raw_response.decode("utf-8"))
-    return json.dumps(payload, ensure_ascii=False)
+    }
+    return proxy("/internal/sowork/meetings/read", payload, timeout=90)
 
 
 SCHEMA = {
