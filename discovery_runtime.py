@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 BASE_URL = "https://api.sowork.com/public"
+ASANA_BASE_URL = "https://app.asana.com/api/1.0"
+ASANA_WORKSPACE_GID = "1209552040826957"
 AGENT_PREFIX = "Discovery Scout —"
 TRIGGER_RE = re.compile(
     r"(?:^\s*/scout(?:\s|$)|@discoveryscout\b|^\s*discovery\s+scout\s*[:—-])",
@@ -264,7 +266,7 @@ def build_prompt(target: dict[str, Any], context: str, config: Config) -> str:
         {context}
         </group-context>
 
-        Follow the discovery-scout skill. Use focused Q&A unless the request clearly asks for a full Stage 0/1.1 run. Load any other relevant installed skills before acting. Main inference must remain the configured OpenAI Codex provider. OpenRouter is available only as an optional API for models or media.
+        Follow the discovery-scout skill. Use focused Q&A unless the request clearly asks for a full Stage 0/1.1 run. Load any other relevant installed skills before acting. Main inference must remain the configured OpenAI Codex provider. OpenRouter is available only as an optional API for models or media. Read-only access to the approved Suhail Asana workspace is available through asana_read. It cannot create, edit, assign, move, complete, or delete tasks; any proposed Asana change requires Guillermo's approval of the exact changes before a separate write capability may be used.
 
         For every request that generates, creates, or edits one or more images, the final answer MUST include each generated image's safe public HTTPS URL on its own line in the form "Image URL: https://...". Never return a local path, file:// URL, data URL, or inaccessible internal URL. If the image tool does not provide a public HTTPS URL, do not claim that the image was delivered: retry with an approved public-URL-producing image provider when possible, otherwise state clearly that no deliverable URL was produced.
 
@@ -350,7 +352,7 @@ def agent_toolsets() -> str:
     deliberately excluded; they could expose process credentials or escape this
     restriction. Research uses the URL-safety-enforced web toolset.
     """
-    return "web,image_gen,vision,skills_readonly,openrouter_safe,todo"
+    return "web,image_gen,vision,skills_readonly,openrouter_safe,asana_safe,todo"
 
 
 def run_agent(config: Config, prompt: str) -> str:
@@ -514,6 +516,111 @@ def call_openrouter(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+ASANA_READ_ACTIONS = {
+    "get_me", "list_projects", "get_project", "list_sections",
+    "list_tasks", "get_task", "search_tasks",
+}
+ASANA_GID_RE = re.compile(r"^[0-9]{1,32}$")
+
+
+def validate_asana_payload(payload: dict[str, Any]) -> tuple[str, str, str, str, int]:
+    action = str(payload.get("action", "")).strip()
+    project_gid = str(payload.get("project_gid", "")).strip()
+    task_gid = str(payload.get("task_gid", "")).strip()
+    query = str(payload.get("query", "")).strip()
+    try:
+        limit = int(payload.get("limit", 50))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid limit") from exc
+    if action not in ASANA_READ_ACTIONS:
+        raise ValueError("unsupported read action")
+    if action in {"get_project", "list_sections", "list_tasks"} and not ASANA_GID_RE.fullmatch(project_gid):
+        raise ValueError("valid project_gid required")
+    if action == "get_task" and not ASANA_GID_RE.fullmatch(task_gid):
+        raise ValueError("valid task_gid required")
+    if action == "search_tasks" and (not query or len(query) > 200):
+        raise ValueError("query must contain 1 to 200 characters")
+    if limit < 1 or limit > 100:
+        raise ValueError("limit must be between 1 and 100")
+    return action, project_gid, task_gid, query, limit
+
+
+def _asana_path(payload: dict[str, Any]) -> str:
+    action, project_gid, task_gid, query, limit = validate_asana_payload(payload)
+    common_task_fields = (
+        "gid,name,completed,assignee.name,due_on,due_at,modified_at,"
+        "permalink_url,memberships.section.name"
+    )
+    if action == "get_me":
+        return "/users/me?" + urllib.parse.urlencode({
+            "opt_fields": "gid,name,email,workspaces.gid,workspaces.name",
+        })
+    if action == "list_projects":
+        return "/projects?" + urllib.parse.urlencode({
+            "workspace": ASANA_WORKSPACE_GID, "archived": "false", "limit": limit,
+            "opt_fields": "gid,name,archived,modified_at,permalink_url",
+        })
+    if action == "get_project":
+        return f"/projects/{project_gid}?" + urllib.parse.urlencode({
+            "opt_fields": "gid,name,notes,archived,created_at,modified_at,owner.name,permalink_url",
+        })
+    if action == "list_sections":
+        return f"/projects/{project_gid}/sections?" + urllib.parse.urlencode({
+            "limit": limit, "opt_fields": "gid,name,created_at",
+        })
+    if action == "list_tasks":
+        return f"/projects/{project_gid}/tasks?" + urllib.parse.urlencode({
+            "limit": limit, "opt_fields": common_task_fields,
+        })
+    if action == "get_task":
+        return f"/tasks/{task_gid}?" + urllib.parse.urlencode({
+            "opt_fields": common_task_fields + ",notes,projects.gid,projects.name",
+        })
+    return f"/workspaces/{ASANA_WORKSPACE_GID}/tasks/search?" + urllib.parse.urlencode({
+        "text": query, "limit": limit, "opt_fields": common_task_fields,
+    })
+
+
+def _bound_asana_value(value: Any, depth: int = 0) -> Any:
+    if depth > 8:
+        return "[TRUNCATED]"
+    if isinstance(value, str):
+        return redact_outbound(value)[:12000]
+    if isinstance(value, list):
+        return [_bound_asana_value(item, depth + 1) for item in value[:100]]
+    if isinstance(value, dict):
+        return {
+            str(key)[:100]: _bound_asana_value(item, depth + 1)
+            for key, item in list(value.items())[:100]
+        }
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:1000]
+
+
+def call_asana(payload: dict[str, Any]) -> dict[str, Any]:
+    token = os.environ.get("ASANA_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("Asana is not configured")
+    request = urllib.request.Request(
+        ASANA_BASE_URL + _asana_path(payload),
+        method="GET",
+        headers={
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+            "User-Agent": "Suhail-Discovery-Scout-Maritime/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=45) as response:
+        raw_response = response.read(1_000_001)
+    if len(raw_response) > 1_000_000:
+        raise RuntimeError("Asana response exceeded 1 MB")
+    result = json.loads(raw_response.decode("utf-8"))
+    if not isinstance(result, dict):
+        raise RuntimeError("Asana returned an invalid response")
+    return _bound_asana_value(result)
+
+
 def webhook_action(_raw_body: bytes) -> str:
     """Public webhooks are wake signals only; their body never reaches the LLM."""
     return "poll"
@@ -606,6 +713,31 @@ class RuntimeServer:
                 })
 
             def do_POST(self) -> None:
+                if self.path == "/internal/asana/read":
+                    supplied_token = self.headers.get("X-Discovery-Internal-Token", "")
+                    if (
+                        self.client_address[0] not in {"127.0.0.1", "::1"}
+                        or not hmac.compare_digest(supplied_token, outer.openrouter_proxy_token)
+                    ):
+                        self._json(403, {"error": "forbidden"})
+                        return
+                    try:
+                        declared = parse_content_length(
+                            self.headers.get("Content-Length"), maximum=4096
+                        )
+                        raw = self.rfile.read(declared) if declared else b"{}"
+                        payload = json.loads(raw.decode("utf-8"))
+                        if not isinstance(payload, dict):
+                            raise ValueError("JSON object required")
+                        result = call_asana(payload)
+                    except ValueError as exc:
+                        self._json(400, {"error": str(exc)})
+                        return
+                    except Exception:
+                        self._json(502, {"error": "Asana request failed"})
+                        return
+                    self._json(200, result)
+                    return
                 if self.path == "/internal/openrouter/query":
                     supplied_token = self.headers.get("X-Discovery-Internal-Token", "")
                     if (

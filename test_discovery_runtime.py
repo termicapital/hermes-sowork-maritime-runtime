@@ -81,7 +81,7 @@ class RuntimeContractTests(unittest.TestCase):
     def test_group_agent_toolsets_exclude_raw_secret_surfaces(self):
         toolsets = set(self.runtime.agent_toolsets().split(","))
         self.assertFalse({"terminal", "file", "code_execution", "delegation", "browser", "skills"} & toolsets)
-        self.assertTrue({"web", "image_gen", "vision", "skills_readonly", "openrouter_safe"} <= toolsets)
+        self.assertTrue({"web", "image_gen", "vision", "skills_readonly", "openrouter_safe", "asana_safe"} <= toolsets)
 
     def test_child_environment_removes_credentials(self):
         env = {
@@ -91,6 +91,7 @@ class RuntimeContractTests(unittest.TestCase):
             "SOWORK_API_TOKEN": "sw_secret",
             "HERMES_CODEX_AUTH_B64": "encoded-secret",
             "OPENROUTER_API_KEY": "sk-or-secret",
+            "ASANA_TOKEN": "asana-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
             "NOTION_API_TOKEN": "ntn-secret",
             "DATABASE_URL": "postgres://private",
@@ -99,6 +100,21 @@ class RuntimeContractTests(unittest.TestCase):
         }
         child = self.runtime.sanitized_child_env(env)
         self.assertEqual(child, {"PATH": "/bin", "HOME": "/data/hermes", "HERMES_HOME": "/data/hermes"})
+
+    def test_asana_payload_is_read_only_and_bounded(self):
+        valid = self.runtime.validate_asana_payload({"action": "list_projects", "limit": 25})
+        self.assertEqual(valid, ("list_projects", "", "", "", 25))
+        path = self.runtime._asana_path({"action": "list_projects"})
+        self.assertIn("workspace=1209552040826957", path)
+        for payload in (
+            {"action": "create_task"},
+            {"action": "list_tasks"},
+            {"action": "get_task", "task_gid": "not-a-gid"},
+            {"action": "search_tasks", "query": "x" * 201},
+            {"action": "list_projects", "limit": 101},
+        ):
+            with self.assertRaises(ValueError):
+                self.runtime.validate_asana_payload(payload)
 
     def test_outbound_redaction_blocks_exact_and_pattern_secrets(self):
         env = {"SOWORK_API_TOKEN": "sw_actual_secret_123", "OPENROUTER_API_KEY": "sk-or-v1-abcdef1234567890"}

@@ -10,6 +10,7 @@ Generic, credential-free Maritime runtime for a Hermes-based SoWork group agent.
 - The Hermes child receives a strict non-secret environment allowlist and the runtime refuses to start if `/data/hermes/.env` exists.
 - Shared skills are exposed through a custom read-only toolset (`skills_list` and `skill_view`, never `skill_manage`).
 - OpenRouter requests use a bounded model allowlist and a loopback-only parent proxy; the Hermes child never receives the key.
+- Asana access is restricted to read-only account/project/section/task queries in the approved Suhail workspace through the same capability-protected parent boundary; the Hermes child never receives the token and exposes no mutation action.
 - Terminal, file, code execution, delegation, and browser toolsets are excluded from the shared surface.
 - Inference is bounded to two workers; public HTTP concurrency, body size, and socket duration are capped.
 - State, skills, authentication, and deduplication live directly under `/data/hermes`, Maritime's persistent volume. The inherited anonymous `/opt/data` Docker volume is deliberately unused because it is replaced on redeploy.
@@ -25,7 +26,7 @@ Generic, credential-free Maritime runtime for a Hermes-based SoWork group agent.
 
 ## Required environment
 
-Secrets: `SOWORK_API_TOKEN`, `HERMES_CODEX_AUTH_B64`, `OPENROUTER_API_KEY`.
+Secrets: `SOWORK_API_TOKEN`, `HERMES_CODEX_AUTH_B64`, `OPENROUTER_API_KEY`, `ASANA_TOKEN`.
 
 Non-secret: `SOWORK_CHANNEL_ID`, `SOWORK_ALLOWED_USER_IDS`, `DISCOVERY_BRIDGE_ENABLED`, `DISCOVERY_POLL_INTERVAL`, `PORT`.
 

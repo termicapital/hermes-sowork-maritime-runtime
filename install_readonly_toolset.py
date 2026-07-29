@@ -18,15 +18,22 @@ BLOCK = '''    "skills_readonly": {
         "includes": []
     },
 
+    "asana_safe": {
+        "description": "Read-only Asana access through a parent-held credential",
+        "tools": ["asana_read"],
+        "includes": []
+    },
+
 '''
 
 
 def patch_source(source: str) -> str:
     has_readonly = '"skills_readonly"' in source
     has_openrouter = '"openrouter_safe"' in source
-    if has_readonly and has_openrouter:
+    has_asana = '"asana_safe"' in source
+    if has_readonly and has_openrouter and has_asana:
         return source
-    if has_readonly or has_openrouter:
+    if has_readonly or has_openrouter or has_asana:
         raise RuntimeError("Hermes toolsets.py has a partial Discovery runtime patch")
     if MARKER not in source:
         raise RuntimeError("Pinned Hermes toolsets.py no longer has the expected skills marker")
