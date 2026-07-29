@@ -145,6 +145,27 @@ class RuntimeContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.runtime.validate_sowork_meeting_payload(payload)
 
+    def test_meeting_response_bound_accounts_for_non_ascii_transport_expansion(self):
+        payload = {"noteContents": "ا" * 50000}
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, limit):
+                self.limit = limit
+                return self.runtime_json
+
+        response = Response()
+        response.runtime_json = self.runtime.json.dumps(payload, ensure_ascii=False).encode()
+        config = self.runtime.Config(
+            channel_id="c", allowed_user_ids={"u"}, api_token="sw_test", enabled=False,
+        )
+        with patch.object(self.runtime.urllib.request, "urlopen", return_value=response):
+            result = self.runtime.call_sowork_meetings(config, {"action": "list_meetings"})
+        self.assertEqual(response.limit, 5_000_001)
+        self.assertTrue(result["truncated"])
+        self.assertLess(len(self.runtime.json.dumps(result).encode("utf-8")), 250_000)
+
     def test_outbound_redaction_blocks_exact_and_pattern_secrets(self):
         env = {"SOWORK_API_TOKEN": "sw_actual_secret_123", "OPENROUTER_API_KEY": "sk-or-v1-abcdef1234567890"}
         text = "tokens sw_actual_secret_123 and sk-or-v1-abcdef1234567890"

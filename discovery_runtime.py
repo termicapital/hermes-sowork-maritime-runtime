@@ -715,7 +715,9 @@ def call_sowork_meetings(config: Config, payload: dict[str, Any]) -> dict[str, A
     if not isinstance(result, dict):
         raise RuntimeError("SoWork meeting library returned an invalid response")
     bounded = _bound_meeting_value(result)
-    encoded = json.dumps(bounded, ensure_ascii=False)
+    # Match BaseHTTPRequestHandler._json's default ASCII-safe serialization so
+    # Arabic/non-ASCII text cannot expand beyond the child-side transport cap.
+    encoded = json.dumps(bounded)
     encoded_bytes = encoded.encode("utf-8")
     if len(encoded_bytes) > 220_000:
         preview = encoded_bytes[:180000].decode("utf-8", errors="ignore")
