@@ -900,11 +900,14 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
                     timeout=timeout,
                     bound_result=False,
                 )
-                if isinstance(result, dict) and result.get("error"):
+                if isinstance(result, dict) and "error" in result:
                     error = result["error"]
+                    raw_code = (
+                        str(error.get("code", "")) if isinstance(error, dict) else ""
+                    )
                     code = (
-                        str(error.get("code", "provider_error"))[:100]
-                        if isinstance(error, dict)
+                        raw_code
+                        if re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", raw_code)
                         else "provider_error"
                     )
                     raise RuntimeError(f"OpenRouter deep research failed ({code})")

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -304,6 +305,47 @@ class SecureExpansionTests(unittest.TestCase):
                     "model": "sonar-deep-research",
                 }
             )
+
+    def test_perplexity_openrouter_fallback_sanitizes_malformed_error_payloads(self):
+        r = self.runtime
+        cases = (
+            ({"error": {}}, "OpenRouter deep research failed (provider_error)"),
+            (
+                {"error": {"code": "bad\nINJECT sk-or-v1-not-a-real-key"}},
+                "OpenRouter deep research failed (provider_error)",
+            ),
+        )
+        for fallback_payload, expected in cases:
+            quota_error = r.urllib.error.HTTPError(
+                "https://api.perplexity.ai/v1/sonar",
+                401,
+                "insufficient_quota",
+                {},
+                io.BytesIO(b"{}"),
+            )
+            with (
+                self.subTest(fallback_payload=fallback_payload),
+                patch.dict(
+                    os.environ,
+                    {
+                        "PERPLEXITY_API_KEY": "perplexity-secret",
+                        "OPENROUTER_API_KEY": "openrouter-secret",
+                    },
+                ),
+                patch.object(
+                    r,
+                    "_provider_json",
+                    side_effect=[quota_error, fallback_payload],
+                ),
+                self.assertRaisesRegex(RuntimeError, f"^{re.escape(expected)}$"),
+            ):
+                r.call_perplexity(
+                    {
+                        "action": "chat",
+                        "prompt": "q",
+                        "model": "sonar-deep-research",
+                    }
+                )
 
     def test_xai_responses_is_fixed_and_tools_are_allowlisted(self):
         r = self.runtime
