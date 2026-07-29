@@ -17,12 +17,13 @@ def perplexity_safe(
             "max_tokens": max_tokens,
             "limit": limit,
         },
+        timeout=1250 if model == "sonar-deep-research" else 300,
     )
 
 
 SCHEMA = {
     "name": "perplexity_safe",
-    "description": "Bounded Perplexity search or chat. Models: sonar, sonar-pro, sonar-reasoning-pro, sonar-deep-research. Use deep research directly when the methodology instructs it.",
+    "description": "Bounded Perplexity search or chat. Models: sonar, sonar-pro, sonar-reasoning-pro, sonar-deep-research. Full discovery runs use deep research with a long timeout and automatic same-model OpenRouter fallback when direct Perplexity is unavailable or out of credit.",
     "parameters": {
         "type": "object",
         "properties": {

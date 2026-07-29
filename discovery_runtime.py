@@ -861,16 +861,91 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
             {"query": text, "max_results": limit},
         )
     else:
-        result = _provider_json(
-            "https://api.perplexity.ai/v1/sonar",
-            "PERPLEXITY_API_KEY",
-            {
-                "model": model,
-                "messages": [{"role": "user", "content": text}],
-                "max_tokens": max_tokens,
-            },
-            timeout=900 if model == "sonar-deep-research" else 300,
-        )
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": text}],
+            "max_tokens": max_tokens,
+        }
+        if model == "sonar-deep-research":
+            timeout = 1200
+            result = None
+            if os.environ.get("PERPLEXITY_API_KEY", "").strip():
+                try:
+                    result = _provider_json(
+                        "https://api.perplexity.ai/v1/sonar",
+                        "PERPLEXITY_API_KEY",
+                        body,
+                        timeout=timeout,
+                        bound_result=False,
+                    )
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in {
+                        401,
+                        402,
+                        403,
+                        404,
+                        408,
+                        409,
+                        425,
+                        429,
+                    } and not (500 <= exc.code <= 599):
+                        raise
+                except (TimeoutError, ConnectionError, urllib.error.URLError):
+                    pass
+            if result is None:
+                result = _provider_json(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    "OPENROUTER_API_KEY",
+                    {**body, "model": "perplexity/sonar-deep-research"},
+                    timeout=timeout,
+                    bound_result=False,
+                )
+        else:
+            result = _provider_json(
+                "https://api.perplexity.ai/v1/sonar",
+                "PERPLEXITY_API_KEY",
+                body,
+                timeout=300,
+            )
+    if action == "chat" and isinstance(result, dict):
+        compact: dict[str, Any] = {
+            "model": str(result.get("model", model))[:200],
+            "choices": [],
+        }
+        choices = result.get("choices") or []
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            choice = choices[0]
+            message = choice.get("message") or {}
+            if isinstance(message, dict):
+                compact_message: dict[str, Any] = {
+                    "role": str(message.get("role", "assistant"))[:20],
+                    "content": str(message.get("content", ""))[:40000],
+                }
+                annotations = message.get("annotations")
+                if isinstance(annotations, list):
+                    selected_annotations = annotations[:20]
+                    compact_message["annotations"] = _bounded(selected_annotations)
+                    annotation_urls = []
+                    for annotation in selected_annotations:
+                        if not isinstance(annotation, dict):
+                            continue
+                        url = str(annotation.get("url", ""))[:2048]
+                        if annotation.get("type") == "url_citation" and url.startswith(
+                            ("https://", "http://")
+                        ):
+                            annotation_urls.append(url)
+                    if annotation_urls:
+                        compact["citations"] = annotation_urls
+                compact["choices"] = [
+                    {
+                        "message": compact_message,
+                        "finish_reason": str(choice.get("finish_reason", ""))[:100],
+                    }
+                ]
+        for key in ("citations", "search_results", "results"):
+            if isinstance(result.get(key), list):
+                compact[key] = _bounded(result[key][:20])
+        result = compact
     if isinstance(result, dict):
         for key in ("citations", "search_results", "results"):
             if isinstance(result.get(key), list):

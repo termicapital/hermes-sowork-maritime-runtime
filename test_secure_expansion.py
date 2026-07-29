@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -173,6 +174,101 @@ class SecureExpansionTests(unittest.TestCase):
             "https://api.perplexity.ai/v1/sonar",
         )
         self.assertLessEqual(len(out["citations"]), 20)
+
+    def test_perplexity_deep_research_falls_back_to_openrouter(self):
+        r = self.runtime
+        quota_error = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            401,
+            "insufficient_quota",
+            {},
+            io.BytesIO(b'{"error":{"code":"insufficient_quota"}}'),
+        )
+        fallback_result = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "researched",
+                        "reasoning_details": "x" * 200_000,
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": f"https://example.com/{index}",
+                            }
+                            for index in range(30)
+                        ],
+                    }
+                }
+            ],
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(
+                r, "_provider_json", side_effect=[quota_error, fallback_result]
+            ) as provider,
+        ):
+            out = r.call_perplexity(
+                {
+                    "action": "chat",
+                    "prompt": "Research Saudi robotics sandboxes",
+                    "model": "sonar-deep-research",
+                    "max_tokens": 2000,
+                }
+            )
+        self.assertEqual(provider.call_count, 2)
+        direct_call, fallback_call = provider.call_args_list
+        self.assertEqual(direct_call.args[0], "https://api.perplexity.ai/v1/sonar")
+        self.assertEqual(direct_call.kwargs["timeout"], 1200)
+        self.assertEqual(
+            fallback_call.args[:2],
+            (
+                "https://openrouter.ai/api/v1/chat/completions",
+                "OPENROUTER_API_KEY",
+            ),
+        )
+        self.assertEqual(
+            fallback_call.args[2]["model"], "perplexity/sonar-deep-research"
+        )
+        self.assertEqual(fallback_call.kwargs["timeout"], 1200)
+        self.assertFalse(fallback_call.kwargs["bound_result"])
+        self.assertEqual(len(out["citations"]), 20)
+        self.assertEqual(out["choices"][0]["message"]["content"], "researched")
+        self.assertNotIn("truncated", out)
+
+    def test_perplexity_deep_research_invalid_request_does_not_fallback(self):
+        r = self.runtime
+        invalid_request = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            400,
+            "invalid_request",
+            {},
+            io.BytesIO(b'{"error":{"code":"invalid_request"}}'),
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(r, "_provider_json", side_effect=invalid_request) as provider,
+            self.assertRaises(r.urllib.error.HTTPError),
+        ):
+            r.call_perplexity(
+                {
+                    "action": "chat",
+                    "prompt": "q",
+                    "model": "sonar-deep-research",
+                }
+            )
+        self.assertEqual(provider.call_count, 1)
 
     def test_xai_responses_is_fixed_and_tools_are_allowlisted(self):
         r = self.runtime
