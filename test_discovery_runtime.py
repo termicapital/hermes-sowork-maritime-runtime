@@ -81,7 +81,7 @@ class RuntimeContractTests(unittest.TestCase):
     def test_group_agent_toolsets_exclude_raw_secret_surfaces(self):
         toolsets = set(self.runtime.agent_toolsets().split(","))
         self.assertFalse({"terminal", "file", "code_execution", "delegation", "browser", "skills"} & toolsets)
-        self.assertTrue({"web", "image_gen", "vision", "skills_readonly", "openrouter_safe", "asana_safe"} <= toolsets)
+        self.assertTrue({"web", "image_gen", "vision", "skills_readonly", "openrouter_safe", "asana_safe", "sowork_meetings_safe"} <= toolsets)
 
     def test_child_environment_removes_credentials(self):
         env = {
@@ -115,6 +115,35 @@ class RuntimeContractTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 self.runtime.validate_asana_payload(payload)
+
+    def test_sowork_meeting_paths_are_read_only_bounded_and_exclude_video(self):
+        list_path = self.runtime._sowork_meeting_path({"action": "list_meetings", "limit": 10})
+        self.assertEqual(list_path, "/v1/meeting-library?limit=10")
+        search_path = self.runtime._sowork_meeting_path({
+            "action": "search_meetings", "query": "venture builder", "kind": "transcript",
+        })
+        self.assertTrue(search_path.startswith("/v1/meeting-library/search?"))
+        self.assertIn("query=venture+builder", search_path)
+        self.assertIn("kinds=transcript", search_path)
+        detail_path = self.runtime._sowork_meeting_path({
+            "action": "get_meeting", "digest_id": "digest_123",
+        })
+        self.assertIn("include=notes", detail_path)
+        self.assertIn("include=transcript", detail_path)
+        self.assertIn("include=chat", detail_path)
+        self.assertNotIn("video", detail_path.lower())
+        bounded = self.runtime._bound_meeting_value({
+            "hasRecording": True, "videoUrl": "https://private/video", "notes": "ok",
+        })
+        self.assertEqual(bounded, {"hasRecording": True, "notes": "ok"})
+        for payload in (
+            {"action": "delete_meeting"},
+            {"action": "get_meeting", "digest_id": "../../secret"},
+            {"action": "search_meetings", "query": ""},
+            {"action": "list_meetings", "limit": 51},
+        ):
+            with self.assertRaises(ValueError):
+                self.runtime.validate_sowork_meeting_payload(payload)
 
     def test_outbound_redaction_blocks_exact_and_pattern_secrets(self):
         env = {"SOWORK_API_TOKEN": "sw_actual_secret_123", "OPENROUTER_API_KEY": "sk-or-v1-abcdef1234567890"}
@@ -211,6 +240,33 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(len(result["model"]), 200)
         self.assertEqual(len(result["text"]), 16000)
         self.assertEqual(result["usage"], {"prompt_tokens": 1})
+
+    def test_internal_sowork_meetings_endpoint_requires_runtime_capability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.runtime.Config(
+                channel_id="c", allowed_user_ids={"u"}, api_token="sw_test",
+                enabled=False, data_dir=Path(tmp), port=0,
+            )
+            server = self.runtime.RuntimeServer(config)
+            thread = self.runtime.threading.Thread(target=server.httpd.serve_forever, daemon=True)
+            thread.start()
+            port = server.httpd.server_address[1]
+            body = b'{"action":"delete_meeting"}'
+            request = self.runtime.urllib.request.Request(
+                f"http://127.0.0.1:{port}/internal/sowork/meetings/read",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(self.runtime.urllib.error.HTTPError) as denied:
+                self.runtime.urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(denied.exception.code, 403)
+            request.add_header("X-Discovery-Internal-Token", server.openrouter_proxy_token)
+            with self.assertRaises(self.runtime.urllib.error.HTTPError) as validated:
+                self.runtime.urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(validated.exception.code, 400)
+            server.httpd.shutdown()
+            server.httpd.server_close()
+            server.executor.shutdown(wait=True)
 
     def test_internal_openrouter_endpoint_requires_runtime_capability(self):
         with tempfile.TemporaryDirectory() as tmp:

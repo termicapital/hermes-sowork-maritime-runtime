@@ -4,6 +4,7 @@ USER root
 COPY discovery_runtime.py /opt/discovery-runtime/discovery_runtime.py
 COPY openrouter_safe_tool.py /opt/hermes/tools/openrouter_safe_tool.py
 COPY asana_safe_tool.py /opt/hermes/tools/asana_safe_tool.py
+COPY sowork_meetings_safe_tool.py /opt/hermes/tools/sowork_meetings_safe_tool.py
 COPY install_readonly_toolset.py /opt/discovery-runtime/install_readonly_toolset.py
 COPY --chmod=0755 entrypoint.sh /opt/discovery-runtime/entrypoint.sh
 COPY --chmod=0755 verify-runtime.sh /opt/discovery-runtime/verify-runtime.sh

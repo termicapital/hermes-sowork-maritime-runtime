@@ -11,6 +11,7 @@ from toolsets import resolve_toolset
 assert set(resolve_toolset('skills_readonly')) == {'skills_list', 'skill_view'}
 assert set(resolve_toolset('openrouter_safe')) == {'openrouter_query'}
 assert set(resolve_toolset('asana_safe')) == {'asana_read'}
+assert set(resolve_toolset('sowork_meetings_safe')) == {'sowork_meetings_read'}
 print('skills_readonly', resolve_toolset('skills_readonly'))
 PY
 /opt/hermes/.venv/bin/python - <<'PY'

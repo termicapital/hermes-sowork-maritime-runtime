@@ -33,6 +33,8 @@ class ReadonlyToolsetInstallerTests(unittest.TestCase):
         self.assertIn('"openrouter_query"', patched)
         self.assertIn('"asana_safe"', patched)
         self.assertIn('"asana_read"', patched)
+        self.assertIn('"sowork_meetings_safe"', patched)
+        self.assertIn('"sowork_meetings_read"', patched)
 
     def test_patch_is_idempotent(self):
         source = '''TOOLSETS = {

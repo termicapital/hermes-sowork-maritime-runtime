@@ -11,6 +11,7 @@ Generic, credential-free Maritime runtime for a Hermes-based SoWork group agent.
 - Shared skills are exposed through a custom read-only toolset (`skills_list` and `skill_view`, never `skill_manage`).
 - OpenRouter requests use a bounded model allowlist and a loopback-only parent proxy; the Hermes child never receives the key.
 - Asana access is restricted to read-only account/project/section/task queries in the approved Suhail workspace through the same capability-protected parent boundary; the Hermes child never receives the token and exposes no mutation action.
+- SoWork Meeting Library access is read-only and capability-protected: the agent may list/search ended meetings and retrieve API-exposed notes, transcripts, and meeting chat, but the tool never requests or returns recording/video URLs and exposes no mutation action.
 - Terminal, file, code execution, delegation, and browser toolsets are excluded from the shared surface.
 - Inference is bounded to two workers; public HTTP concurrency, body size, and socket duration are capped.
 - State, skills, authentication, and deduplication live directly under `/data/hermes`, Maritime's persistent volume. The inherited anonymous `/opt/data` Docker volume is deliberately unused because it is replaced on redeploy.
@@ -23,6 +24,7 @@ Generic, credential-free Maritime runtime for a Hermes-based SoWork group agent.
 
 - `GET /health` — runtime status and non-secret processing counts.
 - `POST /webhook` — coalesced wake/poll signal; request body is ignored.
+- Internal capability-protected endpoints provide bounded OpenRouter, Asana, and SoWork Meeting Library operations to the sanitized Hermes child. They are not publicly callable without the runtime capability.
 
 ## Required environment
 

@@ -24,6 +24,12 @@ BLOCK = '''    "skills_readonly": {
         "includes": []
     },
 
+    "sowork_meetings_safe": {
+        "description": "Read-only SoWork Meeting Library access through the parent bridge",
+        "tools": ["sowork_meetings_read"],
+        "includes": []
+    },
+
 '''
 
 
@@ -31,9 +37,10 @@ def patch_source(source: str) -> str:
     has_readonly = '"skills_readonly"' in source
     has_openrouter = '"openrouter_safe"' in source
     has_asana = '"asana_safe"' in source
-    if has_readonly and has_openrouter and has_asana:
+    has_meetings = '"sowork_meetings_safe"' in source
+    if has_readonly and has_openrouter and has_asana and has_meetings:
         return source
-    if has_readonly or has_openrouter or has_asana:
+    if has_readonly or has_openrouter or has_asana or has_meetings:
         raise RuntimeError("Hermes toolsets.py has a partial Discovery runtime patch")
     if MARKER not in source:
         raise RuntimeError("Pinned Hermes toolsets.py no longer has the expected skills marker")

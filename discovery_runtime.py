@@ -266,7 +266,7 @@ def build_prompt(target: dict[str, Any], context: str, config: Config) -> str:
         {context}
         </group-context>
 
-        Follow the discovery-scout skill. Use focused Q&A unless the request clearly asks for a full Stage 0/1.1 run. Load any other relevant installed skills before acting. Main inference must remain the configured OpenAI Codex provider. OpenRouter is available only as an optional API for models or media. Read-only access to the approved Suhail Asana workspace is available through asana_read. It cannot create, edit, assign, move, complete, or delete tasks; any proposed Asana change requires Guillermo's approval of the exact changes before a separate write capability may be used.
+        Follow the discovery-scout skill. Use focused Q&A unless the request clearly asks for a full Stage 0/1.1 run. Load any other relevant installed skills before acting. Main inference must remain the configured OpenAI Codex provider. OpenRouter is available only as an optional API for models or media. Read-only access to the approved Suhail Asana workspace is available through asana_read. It cannot create, edit, assign, move, complete, or delete tasks; any proposed Asana change requires Guillermo's approval of the exact changes before a separate write capability may be used. Read-only access to ended meetings in the SoWork Meeting Library is available through sowork_meetings_read. Use it to list/search meetings and retrieve API-exposed notes, transcripts, and meeting chat. Distinguish generated notes from raw transcripts, never claim unavailable transcript content exists, and do not request or return recording/video URLs.
 
         For every request that generates, creates, or edits one or more images, the final answer MUST include each generated image's safe public HTTPS URL on its own line in the form "Image URL: https://...". Never return a local path, file:// URL, data URL, or inaccessible internal URL. If the image tool does not provide a public HTTPS URL, do not claim that the image was delivered: retry with an approved public-URL-producing image provider when possible, otherwise state clearly that no deliverable URL was produced.
 
@@ -352,7 +352,7 @@ def agent_toolsets() -> str:
     deliberately excluded; they could expose process credentials or escape this
     restriction. Research uses the URL-safety-enforced web toolset.
     """
-    return "web,image_gen,vision,skills_readonly,openrouter_safe,asana_safe,todo"
+    return "web,image_gen,vision,skills_readonly,openrouter_safe,asana_safe,sowork_meetings_safe,todo"
 
 
 def run_agent(config: Config, prompt: str) -> str:
@@ -621,6 +621,112 @@ def call_asana(payload: dict[str, Any]) -> dict[str, Any]:
     return _bound_asana_value(result)
 
 
+SOWORK_MEETING_ACTIONS = {"list_meetings", "search_meetings", "get_meeting"}
+SOWORK_MEETING_DIGEST_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+SOWORK_MEETING_KINDS = {"all", "title", "note", "transcript", "chat"}
+
+
+def validate_sowork_meeting_payload(
+    payload: dict[str, Any],
+) -> tuple[str, str, str, str, int, int, int]:
+    action = str(payload.get("action", "")).strip()
+    digest_id = str(payload.get("digest_id", "")).strip()
+    query = str(payload.get("query", "")).strip()
+    kind = str(payload.get("kind", "all")).strip().lower() or "all"
+    try:
+        since = int(payload.get("since", 0))
+        until = int(payload.get("until", 0))
+        limit = int(payload.get("limit", 20))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid numeric meeting-library parameter") from exc
+    if action not in SOWORK_MEETING_ACTIONS:
+        raise ValueError("unsupported meeting-library action")
+    if action == "get_meeting" and not SOWORK_MEETING_DIGEST_RE.fullmatch(digest_id):
+        raise ValueError("valid digest_id required")
+    if action == "search_meetings" and (not query or len(query) > 256):
+        raise ValueError("query must contain 1 to 256 characters")
+    if kind not in SOWORK_MEETING_KINDS:
+        raise ValueError("unsupported search kind")
+    if since < 0 or until < 0 or (since and until and since > until):
+        raise ValueError("invalid time range")
+    if limit < 1 or limit > 50:
+        raise ValueError("limit must be between 1 and 50")
+    return action, digest_id, query, kind, since, until, limit
+
+
+def _sowork_meeting_path(payload: dict[str, Any]) -> str:
+    action, digest_id, query, kind, since, until, limit = validate_sowork_meeting_payload(payload)
+    if action == "get_meeting":
+        query_string = urllib.parse.urlencode([
+            ("include", "notes"),
+            ("include", "transcript"),
+            ("include", "chat"),
+            ("templateId", "summary"),
+            ("language", "auto"),
+        ])
+        return f"/v1/meeting-library/{digest_id}?{query_string}"
+    params: list[tuple[str, str | int]] = [("limit", limit)]
+    if since:
+        params.append(("since", since))
+    if until:
+        params.append(("until", until))
+    if action == "search_meetings":
+        params.insert(0, ("query", query))
+        if kind != "all":
+            params.append(("kinds", kind))
+        return "/v1/meeting-library/search?" + urllib.parse.urlencode(params)
+    return "/v1/meeting-library?" + urllib.parse.urlencode(params)
+
+
+def _bound_meeting_value(value: Any, depth: int = 0) -> Any:
+    if depth > 10:
+        return "[TRUNCATED]"
+    if isinstance(value, str):
+        return redact_outbound(value)[:120000]
+    if isinstance(value, list):
+        return [_bound_meeting_value(item, depth + 1) for item in value[:500]]
+    if isinstance(value, dict):
+        blocked = {"videoUrl", "recordingUrl", "downloadUrl"}
+        return {
+            str(key)[:100]: _bound_meeting_value(item, depth + 1)
+            for key, item in list(value.items())[:200]
+            if str(key) not in blocked
+        }
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:1000]
+
+
+def call_sowork_meetings(config: Config, payload: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        BASE_URL + _sowork_meeting_path(payload),
+        method="GET",
+        headers={
+            "Authorization": "Bearer " + config.api_token,
+            "Accept": "application/json",
+            "User-Agent": "Suhail-Discovery-Scout-Maritime/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        raw_response = response.read(5_000_001)
+    if len(raw_response) > 5_000_000:
+        raise RuntimeError("SoWork meeting-library response exceeded 5 MB")
+    result = json.loads(raw_response.decode("utf-8"))
+    if not isinstance(result, dict):
+        raise RuntimeError("SoWork meeting library returned an invalid response")
+    bounded = _bound_meeting_value(result)
+    encoded = json.dumps(bounded, ensure_ascii=False)
+    encoded_bytes = encoded.encode("utf-8")
+    if len(encoded_bytes) > 220_000:
+        preview = encoded_bytes[:180000].decode("utf-8", errors="ignore")
+        return {
+            "truncated": True,
+            "content_preview": preview,
+            "message": "Meeting content exceeded the tool limit; refine the search or request a narrower meeting.",
+        }
+    return bounded
+
+
 def webhook_action(_raw_body: bytes) -> str:
     """Public webhooks are wake signals only; their body never reaches the LLM."""
     return "poll"
@@ -713,6 +819,31 @@ class RuntimeServer:
                 })
 
             def do_POST(self) -> None:
+                if self.path == "/internal/sowork/meetings/read":
+                    supplied_token = self.headers.get("X-Discovery-Internal-Token", "")
+                    if (
+                        self.client_address[0] not in {"127.0.0.1", "::1"}
+                        or not hmac.compare_digest(supplied_token, outer.openrouter_proxy_token)
+                    ):
+                        self._json(403, {"error": "forbidden"})
+                        return
+                    try:
+                        declared = parse_content_length(
+                            self.headers.get("Content-Length"), maximum=4096
+                        )
+                        raw = self.rfile.read(declared) if declared else b"{}"
+                        payload = json.loads(raw.decode("utf-8"))
+                        if not isinstance(payload, dict):
+                            raise ValueError("JSON object required")
+                        result = call_sowork_meetings(outer.config, payload)
+                    except ValueError as exc:
+                        self._json(400, {"error": str(exc)})
+                        return
+                    except Exception:
+                        self._json(502, {"error": "SoWork meeting-library request failed"})
+                        return
+                    self._json(200, result)
+                    return
                 if self.path == "/internal/asana/read":
                     supplied_token = self.headers.get("X-Discovery-Internal-Token", "")
                     if (
