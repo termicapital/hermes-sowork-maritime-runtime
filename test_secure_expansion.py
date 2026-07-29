@@ -428,6 +428,12 @@ class SecureExpansionTests(unittest.TestCase):
             self.runtime.parse_github_write_approval(prepared["approval_marker"]),
             self.runtime.github_write_digest(payload),
         )
+        without_message = {k: v for k, v in payload.items() if k != "message"}
+        explicit_default = {**without_message, "message": "Agent update"}
+        self.assertEqual(
+            self.runtime.github_write_digest(without_message),
+            self.runtime.github_write_digest(explicit_default),
+        )
 
     def test_github_writer_config_is_exactly_one_allowlisted_owner(self):
         cfg = self.runtime.Config(

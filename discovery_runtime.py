@@ -1444,7 +1444,16 @@ def github_write_digest(payload: dict[str, Any]) -> str:
         "base": base,
         "path": path,
         "content": str(payload.get("content", "")),
-        "message": str(payload.get("message", "")),
+        "message": str(
+            payload.get(
+                "message",
+                "Agent update"
+                if action == "upsert_file"
+                else "Agent delete"
+                if action == "delete_file"
+                else "",
+            )
+        ),
         "sha": str(payload.get("sha", "")),
         "title": str(payload.get("title", "")),
         "body": str(payload.get("body", "")),
