@@ -102,6 +102,24 @@ class SecureExpansionTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(req.data), {"query": "ships", "limit": 5})
 
+        with (
+            patch.dict(os.environ, {"FIRECRAWL_API_KEY": "secret"}),
+            patch.object(
+                r.urllib.request,
+                "urlopen",
+                return_value=Response({"success": True, "data": {"markdown": "ok"}}),
+            ) as call,
+        ):
+            r.call_firecrawl(
+                {
+                    "action": "scrape",
+                    "url": "https://example.com/public-research",
+                }
+            )
+        scrape_body = json.loads(call.call_args.args[0].data)
+        self.assertFalse(scrape_body["storeInCache"])
+        self.assertNotIn("zeroDataRetention", scrape_body)
+
     def test_perplexity_exact_endpoints_models_and_bounded_results(self):
         r = self.runtime
         for model in (

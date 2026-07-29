@@ -806,7 +806,6 @@ def call_firecrawl(payload: dict[str, Any]) -> Any:
                 "onlyMainContent": True,
                 "skipTlsVerification": False,
                 "storeInCache": False,
-                "zeroDataRetention": True,
             }
         return _provider_json(
             "https://api.firecrawl.dev/v2/search", "FIRECRAWL_API_KEY", body
@@ -822,7 +821,6 @@ def call_firecrawl(payload: dict[str, Any]) -> Any:
             "proxy": proxy,
             "skipTlsVerification": False,
             "storeInCache": False,
-            "zeroDataRetention": True,
         },
     )
 
