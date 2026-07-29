@@ -900,6 +900,14 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
                     timeout=timeout,
                     bound_result=False,
                 )
+                if isinstance(result, dict) and result.get("error"):
+                    error = result["error"]
+                    code = (
+                        str(error.get("code", "provider_error"))[:100]
+                        if isinstance(error, dict)
+                        else "provider_error"
+                    )
+                    raise RuntimeError(f"OpenRouter deep research failed ({code})")
         else:
             result = _provider_json(
                 "https://api.perplexity.ai/v1/sonar",

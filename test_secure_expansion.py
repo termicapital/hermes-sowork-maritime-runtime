@@ -270,6 +270,41 @@ class SecureExpansionTests(unittest.TestCase):
             )
         self.assertEqual(provider.call_count, 1)
 
+    def test_perplexity_openrouter_fallback_rejects_error_payload(self):
+        r = self.runtime
+        quota_error = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            401,
+            "insufficient_quota",
+            {},
+            io.BytesIO(b"{}"),
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(
+                r,
+                "_provider_json",
+                side_effect=[
+                    quota_error,
+                    {"error": {"code": 402, "message": "Insufficient credits"}},
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "OpenRouter deep research failed"),
+        ):
+            r.call_perplexity(
+                {
+                    "action": "chat",
+                    "prompt": "q",
+                    "model": "sonar-deep-research",
+                }
+            )
+
     def test_xai_responses_is_fixed_and_tools_are_allowlisted(self):
         r = self.runtime
         self.assertEqual(r.validate_xai_payload({"prompt": "q"})[0], "grok-4.5")
