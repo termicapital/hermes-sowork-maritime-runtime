@@ -44,7 +44,7 @@ class AsanaSafeToolTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:8765/internal/asana/read")
         self.assertEqual(request.headers["X-discovery-internal-token"], "t" * 48)
-        self.assertEqual(result["data"][0]["name"], "Project")
+        self.assertEqual(json.loads(result)["data"][0]["name"], "Project")
 
     def test_local_validation_rejects_writes_and_bad_inputs(self):
         with self.assertRaises(ValueError):

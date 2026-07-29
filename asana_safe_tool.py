@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import urllib.request
 from pathlib import Path
-from typing import Any
 
 from tools.registry import registry
 
@@ -28,7 +27,7 @@ def asana_read(
     task_gid: str = "",
     query: str = "",
     limit: int = 50,
-) -> dict[str, Any]:
+) -> str:
     action = str(action).strip()
     project_gid = str(project_gid).strip()
     task_gid = str(task_gid).strip()
@@ -70,7 +69,8 @@ def asana_read(
         raw_response = response.read(100_001)
     if len(raw_response) > 100_000:
         raise RuntimeError("Asana proxy response exceeded 100 KB")
-    return json.loads(raw_response.decode("utf-8"))
+    payload = json.loads(raw_response.decode("utf-8"))
+    return json.dumps(payload, ensure_ascii=False)
 
 
 SCHEMA = {
