@@ -1433,6 +1433,14 @@ def validate_github_payload(payload: dict[str, Any]) -> tuple[Any, ...]:
     return action, repo, branch, base, path, limit
 
 
+def _github_default_message(action: str) -> str:
+    if action == "upsert_file":
+        return "Agent update"
+    if action == "delete_file":
+        return "Agent delete"
+    return ""
+
+
 def github_write_digest(payload: dict[str, Any]) -> str:
     action, repo, branch, base, path, _limit = validate_github_payload(payload)
     if action not in GITHUB_WRITE_ACTIONS:
@@ -1444,16 +1452,7 @@ def github_write_digest(payload: dict[str, Any]) -> str:
         "base": base,
         "path": path,
         "content": str(payload.get("content", "")),
-        "message": str(
-            payload.get(
-                "message",
-                "Agent update"
-                if action == "upsert_file"
-                else "Agent delete"
-                if action == "delete_file"
-                else "",
-            )
-        ),
+        "message": str(payload.get("message", _github_default_message(action))),
         "sha": str(payload.get("sha", "")),
         "title": str(payload.get("title", "")),
         "body": str(payload.get("body", "")),
@@ -1533,7 +1532,7 @@ def call_github(payload: dict[str, Any]) -> Any:
         url = root + "/contents/" + q(path, safe="/")
         method = "PUT" if action == "upsert_file" else "DELETE"
         body = {
-            "message": str(payload.get("message", "Agent update")),
+            "message": str(payload.get("message", _github_default_message(action))),
             "branch": branch,
             "sha": str(payload.get("sha", "")),
         }

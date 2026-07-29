@@ -434,6 +434,9 @@ class SecureExpansionTests(unittest.TestCase):
             self.runtime.github_write_digest(without_message),
             self.runtime.github_write_digest(explicit_default),
         )
+        self.assertEqual(
+            self.runtime._github_default_message("delete_file"), "Agent delete"
+        )
 
     def test_github_writer_config_is_exactly_one_allowlisted_owner(self):
         cfg = self.runtime.Config(
