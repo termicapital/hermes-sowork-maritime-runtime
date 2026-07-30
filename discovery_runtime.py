@@ -1135,6 +1135,89 @@ def call_perplexity(
                     raise RuntimeError(
                         "Independent OpenAI web research returned no citations"
                     )
+        elif model == "sonar":
+            result = None
+            if os.environ.get("PERPLEXITY_API_KEY", "").strip():
+                try:
+                    result = _provider_json(
+                        "https://api.perplexity.ai/v1/sonar",
+                        "PERPLEXITY_API_KEY",
+                        body,
+                        timeout=300,
+                        bound_result=False,
+                    )
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in {
+                        401,
+                        402,
+                        403,
+                        404,
+                        408,
+                        425,
+                        429,
+                    } and not (500 <= exc.code <= 599):
+                        raise
+                except (TimeoutError, ConnectionError, urllib.error.URLError):
+                    pass
+            if isinstance(result, dict) and "error" in result:
+                direct_error = result["error"]
+                raw_code = (
+                    str(direct_error.get("code", ""))
+                    if isinstance(direct_error, dict)
+                    else ""
+                )
+                code = (
+                    raw_code
+                    if re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", raw_code)
+                    else "provider_error"
+                )
+                numeric_code = int(code) if code.isdigit() else None
+                if code in {
+                    "401",
+                    "402",
+                    "403",
+                    "404",
+                    "408",
+                    "425",
+                    "429",
+                    "authentication_error",
+                    "authorization_error",
+                    "insufficient_quota",
+                    "permission_denied",
+                    "quota_exceeded",
+                    "rate_limit_error",
+                    "rate_limit_exceeded",
+                } or (
+                    numeric_code is not None and 500 <= numeric_code <= 599
+                ):
+                    result = None
+                else:
+                    raise RuntimeError(f"Perplexity sonar failed ({code})")
+            if result is None:
+                result = _provider_json(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    "OPENROUTER_API_KEY",
+                    {**body, "model": "perplexity/sonar"},
+                    timeout=300,
+                    bound_result=False,
+                )
+                if isinstance(result, dict) and "error" in result:
+                    fallback_error = result["error"]
+                    fallback_raw_code = (
+                        str(fallback_error.get("code", ""))
+                        if isinstance(fallback_error, dict)
+                        else ""
+                    )
+                    fallback_code = (
+                        fallback_raw_code
+                        if re.fullmatch(
+                            r"[A-Za-z0-9_.-]{1,40}", fallback_raw_code
+                        )
+                        else "provider_error"
+                    )
+                    raise RuntimeError(
+                        f"OpenRouter sonar failed ({fallback_code})"
+                    )
         else:
             result = _provider_json(
                 "https://api.perplexity.ai/v1/sonar",
