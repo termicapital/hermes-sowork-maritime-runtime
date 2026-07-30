@@ -162,7 +162,10 @@ class SecureExpansionTests(unittest.TestCase):
                 return_value=Response(
                     {
                         "choices": [{"message": {"content": "ok"}}],
-                        "citations": ["u"] * 100,
+                        "citations": [
+                            f"https://example.com/source-{index}"
+                            for index in range(100)
+                        ],
                     }
                 ),
             ) as call,
@@ -225,7 +228,7 @@ class SecureExpansionTests(unittest.TestCase):
         self.assertEqual(provider.call_count, 2)
         direct_call, fallback_call = provider.call_args_list
         self.assertEqual(direct_call.args[0], "https://api.perplexity.ai/v1/sonar")
-        self.assertEqual(direct_call.kwargs["timeout"], 1200)
+        self.assertEqual(direct_call.kwargs["timeout"], 600)
         self.assertEqual(
             fallback_call.args[:2],
             (
@@ -236,11 +239,276 @@ class SecureExpansionTests(unittest.TestCase):
         self.assertEqual(
             fallback_call.args[2]["model"], "perplexity/sonar-deep-research"
         )
-        self.assertEqual(fallback_call.kwargs["timeout"], 1200)
+        self.assertEqual(fallback_call.kwargs["timeout"], 500)
         self.assertFalse(fallback_call.kwargs["bound_result"])
+        self.assertEqual(
+            direct_call.args[2]["messages"], fallback_call.args[2]["messages"]
+        )
+        self.assertEqual(
+            direct_call.args[2]["max_tokens"], fallback_call.args[2]["max_tokens"]
+        )
         self.assertEqual(len(out["citations"]), 20)
         self.assertEqual(out["choices"][0]["message"]["content"], "researched")
         self.assertNotIn("truncated", out)
+
+    def test_perplexity_502_uses_independent_openai_web_research_fallback(self):
+        r = self.runtime
+        upstream_502 = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            502,
+            "upstream timeout",
+            {},
+            io.BytesIO(b'{"error":{"code":502}}'),
+        )
+        same_model_error = {
+            "error": {
+                "code": 520,
+                "message": "Transient proxy error from Perplexity",
+            }
+        }
+        independent_result = {
+            "citations": ["not-a-url"],
+            "choices": [
+                {
+                    "message": {
+                        "content": "independent research",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url_citation": {
+                                    "url": "https://example.com/evidence",
+                                    "title": "Evidence",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(
+                r,
+                "_provider_json",
+                side_effect=[upstream_502, same_model_error, independent_result],
+            ) as provider,
+        ):
+            out = r.call_perplexity(
+                {
+                    "action": "chat",
+                    "prompt": "Research Saudi robotics sandboxes",
+                    "model": "sonar-deep-research",
+                    "max_tokens": 2000,
+                }
+            )
+        self.assertEqual(provider.call_count, 3)
+        direct_call, same_model_call, independent_call = provider.call_args_list
+        self.assertEqual(direct_call.kwargs["timeout"], 600)
+        self.assertEqual(same_model_call.kwargs["timeout"], 500)
+        self.assertEqual(independent_call.kwargs["timeout"], 550)
+        self.assertEqual(independent_call.args[2]["model"], "openai/gpt-5.2")
+        self.assertEqual(
+            independent_call.args[2]["messages"], direct_call.args[2]["messages"]
+        )
+        self.assertEqual(
+            independent_call.args[2]["max_tokens"], direct_call.args[2]["max_tokens"]
+        )
+        self.assertEqual(
+            independent_call.args[2]["tools"],
+            [
+                {
+                    "type": "openrouter:web_search",
+                    "parameters": {
+                        "engine": "exa",
+                        "max_results": 10,
+                        "max_uses": 3,
+                        "max_total_results": 30,
+                        "max_characters": 5000,
+                    },
+                }
+            ],
+        )
+        self.assertEqual(independent_call.args[2]["max_tool_calls"], 3)
+        self.assertEqual(out["model"], "openai/gpt-5.2")
+        self.assertEqual(out["citations"], ["https://example.com/evidence"])
+        self.assertEqual(
+            out["choices"][0]["message"]["content"], "independent research"
+        )
+
+    def test_perplexity_direct_eligible_error_envelope_uses_same_model_fallback(self):
+        r = self.runtime
+        for code in (402, 502, "insufficient_quota"):
+            same_model_result = {
+                "model": "perplexity/sonar-deep-research",
+                "choices": [{"message": {"content": "recovered"}}],
+                "citations": ["https://example.com/evidence"],
+            }
+            with (
+                self.subTest(code=code),
+                patch.dict(
+                    os.environ,
+                    {
+                        "PERPLEXITY_API_KEY": "perplexity-secret",
+                        "OPENROUTER_API_KEY": "openrouter-secret",
+                    },
+                ),
+                patch.object(
+                    r,
+                    "_provider_json",
+                    side_effect=[{"error": {"code": code}}, same_model_result],
+                ) as provider,
+            ):
+                out = r.call_perplexity(
+                    {
+                        "action": "chat",
+                        "prompt": "q",
+                        "model": "sonar-deep-research",
+                    }
+                )
+            self.assertEqual(provider.call_count, 2)
+            self.assertEqual(out["choices"][0]["message"]["content"], "recovered")
+
+    def test_independent_openai_fallback_requires_valid_http_citations(self):
+        r = self.runtime
+        invalid_results = (
+            {
+                "model": "openai/gpt-5.2",
+                "choices": [{"message": {"content": "uncited"}}],
+            },
+            {
+                "model": "openai/gpt-5.2",
+                "citations": ["javascript:alert(1)"],
+                "choices": [{"message": {"content": "invalid citation"}}],
+            },
+            {
+                "model": "openai/gpt-5.2",
+                "citations": ["https://"],
+                "choices": [{"message": {"content": "missing hostname"}}],
+            },
+            *(
+                {
+                    "model": "openai/gpt-5.2",
+                    "citations": [url],
+                    "choices": [{"message": {"content": "legacy loopback"}}],
+                }
+                for url in (
+                    "http://127.1/evidence",
+                    "http://2130706433/evidence",
+                    "http://0x7f000001/evidence",
+                    "http://0177.0.0.1/evidence",
+                )
+            ),
+            {
+                "model": "openai/gpt-5.2",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "missing citation URL",
+                            "annotations": [{"type": "url_citation"}],
+                        }
+                    }
+                ],
+            },
+        )
+        for invalid_result in invalid_results:
+            upstream_502 = r.urllib.error.HTTPError(
+                "https://api.perplexity.ai/v1/sonar",
+                502,
+                "upstream timeout",
+                {},
+                io.BytesIO(b"{}"),
+            )
+            with (
+                self.subTest(invalid_result=invalid_result),
+                patch.dict(
+                    os.environ,
+                    {
+                        "PERPLEXITY_API_KEY": "perplexity-secret",
+                        "OPENROUTER_API_KEY": "openrouter-secret",
+                    },
+                ),
+                patch.object(
+                    r,
+                    "_provider_json",
+                    side_effect=[
+                        upstream_502,
+                        {"error": {"code": 502}},
+                        invalid_result,
+                    ],
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "Independent OpenAI web research returned no citations",
+                ),
+            ):
+                r.call_perplexity(
+                    {
+                        "action": "chat",
+                        "prompt": "q",
+                        "model": "sonar-deep-research",
+                    }
+                )
+
+    def test_provider_deadline_exhaustion_prevents_next_paid_stage(self):
+        r = self.runtime
+        now = [100.0]
+
+        def direct_timeout(*_args, **_kwargs):
+            now[0] += 1651
+            raise TimeoutError("direct provider stalled")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(r.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(r, "_provider_json", side_effect=direct_timeout) as provider,
+            self.assertRaisesRegex(TimeoutError, "provider deadline exhausted"),
+        ):
+            r.call_perplexity(
+                {"action": "chat", "prompt": "q", "model": "sonar-deep-research"}
+            )
+        self.assertEqual(provider.call_count, 1)
+
+    def test_cancelled_client_prevents_next_paid_stage(self):
+        r = self.runtime
+        upstream_502 = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            502,
+            "upstream timeout",
+            {},
+            io.BytesIO(b"{}"),
+        )
+        allowed = iter((True, False))
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(r, "_provider_json", side_effect=upstream_502) as provider,
+            self.assertRaisesRegex(RuntimeError, "research request cancelled"),
+        ):
+            r.call_perplexity(
+                {"action": "chat", "prompt": "q", "model": "sonar-deep-research"},
+                continue_allowed=lambda: next(allowed),
+            )
+        self.assertEqual(provider.call_count, 1)
+
+    def test_worker_timeout_leaves_room_for_late_deep_research_invocation(self):
+        self.assertEqual(self.runtime.Config.from_env({}).worker_timeout, 2400)
 
     def test_perplexity_deep_research_invalid_request_does_not_fallback(self):
         r = self.runtime

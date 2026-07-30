@@ -47,7 +47,7 @@ class PerplexitySafeToolTests(unittest.TestCase):
             prompt="Research Saudi robotics",
             model="sonar-deep-research",
         )
-        self.assertEqual(self.proxy.call_args.kwargs["timeout"], 1250)
+        self.assertEqual(self.proxy.call_args.kwargs["timeout"], 1700)
 
     def test_other_models_keep_standard_child_proxy_timeout(self):
         self.module.perplexity_safe(action="chat", prompt="Question", model="sonar-pro")

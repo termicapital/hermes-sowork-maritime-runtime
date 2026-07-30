@@ -75,7 +75,7 @@ class Config:
     data_dir: Path = Path("/data/hermes/discovery-runtime")
     project_dir: Path = Path("/data/hermes/discovery-scout")
     hermes_cmd: str = "hermes"
-    worker_timeout: int = 1800
+    worker_timeout: int = 2400
     max_workers: int = 2
     max_context_messages: int = 16
     max_post_chars: int = 4400
@@ -106,7 +106,7 @@ class Config:
                 source.get("DISCOVERY_PROJECT_DIR", str(home / "discovery-scout"))
             ),
             hermes_cmd=source.get("HERMES_CMD", "hermes"),
-            worker_timeout=int(source.get("DISCOVERY_WORKER_TIMEOUT", "1800")),
+            worker_timeout=int(source.get("DISCOVERY_WORKER_TIMEOUT", "2400")),
             max_workers=max(1, min(4, int(source.get("DISCOVERY_MAX_WORKERS", "2")))),
             public_base_url=source.get("DISCOVERY_PUBLIC_BASE_URL", "")
             .strip()
@@ -746,6 +746,86 @@ def _public_url(value: Any) -> str:
     return url
 
 
+def _citation_url(value: Any) -> str | None:
+    url = str(value or "").strip()
+    if not url or len(url) > 2048 or any(character.isspace() for character in url):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").rstrip(".").lower()
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username
+        or parsed.password
+        or host == "localhost"
+        or host.endswith((".localhost", ".local", ".internal"))
+    ):
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            socket.inet_aton(host)
+        except OSError:
+            pass
+        else:
+            return None
+        try:
+            ascii_host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            return None
+        labels = ascii_host.split(".")
+        if len(ascii_host) > 253 or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not re.fullmatch(r"[A-Za-z0-9-]+", label)
+            for label in labels
+        ):
+            return None
+    else:
+        if not address.is_global:
+            return None
+    return url
+
+
+def _citation_urls(payload: dict[str, Any], limit: int = 20) -> list[str]:
+    urls: list[str] = []
+
+    def add(value: Any) -> None:
+        url = _citation_url(value)
+        if url and url not in urls and len(urls) < limit:
+            urls.append(url)
+
+    citations = payload.get("citations")
+    if isinstance(citations, list):
+        for citation in citations:
+            add(citation)
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        annotations = message.get("annotations") if isinstance(message, dict) else None
+        if isinstance(annotations, list):
+            for annotation in annotations:
+                if (
+                    not isinstance(annotation, dict)
+                    or annotation.get("type") != "url_citation"
+                ):
+                    continue
+                citation = annotation.get("url_citation")
+                add(
+                    citation.get("url", "")
+                    if isinstance(citation, dict)
+                    else annotation.get("url", "")
+                )
+    return urls
+
+
 def validate_firecrawl_payload(payload: dict[str, Any]) -> tuple[Any, ...]:
     allowed = {
         "action",
@@ -852,7 +932,10 @@ def validate_perplexity_payload(
     return action, model, text, max_tokens, limit
 
 
-def call_perplexity(payload: dict[str, Any]) -> Any:
+def call_perplexity(
+    payload: dict[str, Any],
+    continue_allowed: Callable[[], bool] | None = None,
+) -> Any:
     action, model, text, max_tokens, limit = validate_perplexity_payload(payload)
     if action == "search":
         result = _provider_json(
@@ -867,15 +950,28 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
             "max_tokens": max_tokens,
         }
         if model == "sonar-deep-research":
-            timeout = 1200
+            direct_timeout = 600
+            same_model_timeout = 500
+            independent_timeout = 550
+            provider_deadline = time.monotonic() + 1650
+
+            def remaining_timeout(stage_limit: int) -> int:
+                if continue_allowed is not None and not continue_allowed():
+                    raise RuntimeError("research request cancelled")
+                remaining = provider_deadline - time.monotonic()
+                if remaining < 1:
+                    raise TimeoutError("provider deadline exhausted")
+                return min(stage_limit, int(remaining))
+
             result = None
+            used_independent_fallback = False
             if os.environ.get("PERPLEXITY_API_KEY", "").strip():
                 try:
                     result = _provider_json(
                         "https://api.perplexity.ai/v1/sonar",
                         "PERPLEXITY_API_KEY",
                         body,
-                        timeout=timeout,
+                        timeout=remaining_timeout(direct_timeout),
                         bound_result=False,
                     )
                 except urllib.error.HTTPError as exc:
@@ -892,14 +988,55 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
                         raise
                 except (TimeoutError, ConnectionError, urllib.error.URLError):
                     pass
-            if result is None:
-                result = _provider_json(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    "OPENROUTER_API_KEY",
-                    {**body, "model": "perplexity/sonar-deep-research"},
-                    timeout=timeout,
-                    bound_result=False,
+            if isinstance(result, dict) and "error" in result:
+                direct_error = result["error"]
+                direct_raw_code = (
+                    str(direct_error.get("code", ""))
+                    if isinstance(direct_error, dict)
+                    else ""
                 )
+                direct_code = (
+                    direct_raw_code
+                    if re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", direct_raw_code)
+                    else "provider_error"
+                )
+                direct_numeric_code = (
+                    int(direct_code) if direct_code.isdigit() else None
+                )
+                if direct_code in {
+                    "401",
+                    "402",
+                    "403",
+                    "404",
+                    "408",
+                    "409",
+                    "425",
+                    "429",
+                    "insufficient_quota",
+                } or (
+                    direct_numeric_code is not None
+                    and 500 <= direct_numeric_code <= 599
+                ):
+                    result = None
+                else:
+                    raise RuntimeError(
+                        f"Perplexity deep research failed ({direct_code})"
+                    )
+            if result is None:
+                try:
+                    result = _provider_json(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        "OPENROUTER_API_KEY",
+                        {**body, "model": "perplexity/sonar-deep-research"},
+                        timeout=remaining_timeout(same_model_timeout),
+                        bound_result=False,
+                    )
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in {408, 425, 429} and not (500 <= exc.code <= 599):
+                        raise
+                    result = {"error": {"code": exc.code}}
+                except (TimeoutError, ConnectionError, urllib.error.URLError):
+                    result = {"error": {"code": "transient"}}
                 if isinstance(result, dict) and "error" in result:
                     error = result["error"]
                     raw_code = (
@@ -910,7 +1047,60 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
                         if re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", raw_code)
                         else "provider_error"
                     )
-                    raise RuntimeError(f"OpenRouter deep research failed ({code})")
+                    numeric_code = int(code) if code.isdigit() else None
+                    if code not in {"408", "425", "429", "transient"} and not (
+                        numeric_code is not None and 500 <= numeric_code <= 599
+                    ):
+                        raise RuntimeError(f"OpenRouter deep research failed ({code})")
+                    result = _provider_json(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        "OPENROUTER_API_KEY",
+                        {
+                            **body,
+                            "model": "openai/gpt-5.2",
+                            "tools": [
+                                {
+                                    "type": "openrouter:web_search",
+                                    "parameters": {
+                                        "engine": "exa",
+                                        "max_results": 10,
+                                        "max_uses": 3,
+                                        "max_total_results": 30,
+                                        "max_characters": 5000,
+                                    },
+                                }
+                            ],
+                            "max_tool_calls": 3,
+                        },
+                        timeout=remaining_timeout(independent_timeout),
+                        bound_result=False,
+                    )
+                    if isinstance(result, dict) and "error" in result:
+                        independent_error = result["error"]
+                        independent_raw_code = (
+                            str(independent_error.get("code", ""))
+                            if isinstance(independent_error, dict)
+                            else ""
+                        )
+                        independent_code = (
+                            independent_raw_code
+                            if re.fullmatch(
+                                r"[A-Za-z0-9_.-]{1,40}", independent_raw_code
+                            )
+                            else "provider_error"
+                        )
+                        raise RuntimeError(
+                            "Independent OpenAI web research failed "
+                            f"({independent_code})"
+                        )
+                    used_independent_fallback = True
+                    if isinstance(result, dict) and not result.get("model"):
+                        result["model"] = "openai/gpt-5.2"
+            if used_independent_fallback:
+                if not isinstance(result, dict) or not _citation_urls(result):
+                    raise RuntimeError(
+                        "Independent OpenAI web research returned no citations"
+                    )
         else:
             result = _provider_json(
                 "https://api.perplexity.ai/v1/sonar",
@@ -919,10 +1109,13 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
                 timeout=300,
             )
     if action == "chat" and isinstance(result, dict):
+        validated_citations = _citation_urls(result)
         compact: dict[str, Any] = {
             "model": str(result.get("model", model))[:200],
             "choices": [],
         }
+        if validated_citations:
+            compact["citations"] = validated_citations
         choices = result.get("choices") or []
         if isinstance(choices, list) and choices and isinstance(choices[0], dict):
             choice = choices[0]
@@ -936,24 +1129,13 @@ def call_perplexity(payload: dict[str, Any]) -> Any:
                 if isinstance(annotations, list):
                     selected_annotations = annotations[:20]
                     compact_message["annotations"] = _bounded(selected_annotations)
-                    annotation_urls = []
-                    for annotation in selected_annotations:
-                        if not isinstance(annotation, dict):
-                            continue
-                        url = str(annotation.get("url", ""))[:2048]
-                        if annotation.get("type") == "url_citation" and url.startswith(
-                            ("https://", "http://")
-                        ):
-                            annotation_urls.append(url)
-                    if annotation_urls:
-                        compact["citations"] = annotation_urls
                 compact["choices"] = [
                     {
                         "message": compact_message,
                         "finish_reason": str(choice.get("finish_reason", ""))[:100],
                     }
                 ]
-        for key in ("citations", "search_results", "results"):
+        for key in ("search_results", "results"):
             if isinstance(result.get(key), list):
                 compact[key] = _bounded(result[key][:20])
         result = compact
@@ -2025,6 +2207,18 @@ class RuntimeServer:
                 except PermissionError:
                     return False
 
+            def _request_active(self, capability: str) -> bool:
+                try:
+                    outer.run_capabilities.authorize(capability)
+                    peeked = self.connection.recv(
+                        1, socket.MSG_PEEK | socket.MSG_DONTWAIT
+                    )
+                    return bool(peeked)
+                except BlockingIOError:
+                    return True
+                except (OSError, PermissionError):
+                    return False
+
             def do_GET(self) -> None:
                 if self.path.startswith("/media/"):
                     try:
@@ -2126,7 +2320,15 @@ class RuntimeServer:
                                 outer.run_capabilities.authorize_github_write(
                                     supplied, github_write_digest(payload)
                                 )
-                            result = safe_routes[self.path](payload)
+                            if self.path == "/internal/perplexity":
+                                result = call_perplexity(
+                                    payload,
+                                    continue_allowed=lambda: self._request_active(
+                                        supplied
+                                    ),
+                                )
+                            else:
+                                result = safe_routes[self.path](payload)
                     except PermissionError as exc:
                         self._json(403, {"error": str(exc)})
                         return
