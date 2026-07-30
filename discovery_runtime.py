@@ -1452,6 +1452,14 @@ class RunCapabilityRegistry:
             if state is not None:
                 state["reserved"].discard(data_source)
 
+    def poison_notion_write(self, token: str, data_source: str) -> None:
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None or data_source not in state["reserved"]:
+                raise PermissionError("Notion write was not reserved")
+            state["reserved"].remove(data_source)
+            state["used"].add(data_source)
+
     def notion_created_page(self, token: str, data_source: str) -> str | None:
         with self._lock:
             state = self._notion_state.get(token)
@@ -2009,6 +2017,11 @@ NOTION_WRITABLE_TYPES = {
     "files",
 }
 NOTION_CURSOR_MAX = 10_000
+NOTION_SCHEMA_RESULT_MAX = 130_000
+
+
+class NotionMutationAmbiguousError(RuntimeError):
+    """A non-idempotent mutation may have succeeded without a usable response."""
 
 
 def _notion_uuid(value: Any) -> str:
@@ -2049,7 +2062,10 @@ def validate_notion_payload(payload: dict[str, Any]) -> tuple[Any, ...]:
     sorts = payload.get("sorts") or []
     properties = payload.get("properties") or {}
     content = str(payload.get("content", ""))
-    start_cursor = str(payload.get("start_cursor", "")).strip()
+    raw_start_cursor = payload.get("start_cursor", "")
+    if not isinstance(raw_start_cursor, str):
+        raise ValueError("start_cursor must be a string")
+    start_cursor = raw_start_cursor
     try:
         page_size = int(payload.get("page_size", 100))
     except (TypeError, ValueError) as exc:
@@ -2373,6 +2389,10 @@ def _notion_api(
                         delay = 1.0
                     time.sleep(delay)
                     continue
+            if not retry_safe and 500 <= exc.code <= 599:
+                raise NotionMutationAmbiguousError(
+                    "Notion mutation result is ambiguous"
+                ) from exc
             if 400 <= exc.code <= 499:
                 raise ValueError(f"Notion rejected the request ({code})") from exc
             raise RuntimeError(f"Notion request failed ({code})") from exc
@@ -2380,7 +2400,17 @@ def _notion_api(
             if retry_safe and attempt < 2:
                 time.sleep(attempt + 1)
                 continue
+            if not retry_safe:
+                raise NotionMutationAmbiguousError(
+                    "Notion mutation result is ambiguous"
+                ) from exc
             raise RuntimeError("Notion request failed (transient)") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, RuntimeError) as exc:
+            if not retry_safe:
+                raise NotionMutationAmbiguousError(
+                    "Notion mutation result is ambiguous"
+                ) from exc
+            raise
     raise RuntimeError("Notion request failed")
 
 
@@ -2506,6 +2536,21 @@ def _compact_notion_block(block: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _notion_response_cursor(payload: dict[str, Any]) -> str:
+    value = payload.get("next_cursor")
+    if value is None:
+        cursor = ""
+    elif isinstance(value, str):
+        cursor = value
+    else:
+        raise RuntimeError("Notion returned an invalid continuation cursor")
+    if len(cursor) > NOTION_CURSOR_MAX:
+        raise RuntimeError("Notion continuation cursor exceeds the replay bound")
+    if payload.get("has_more") and not cursor:
+        raise RuntimeError("Notion omitted a required continuation cursor")
+    return cursor
+
+
 def _notion_fetch_blocks_page(
     block_id: str, page_size: int, start_cursor: str = ""
 ) -> dict[str, Any]:
@@ -2521,7 +2566,7 @@ def _notion_fetch_blocks_page(
     return {
         "blocks": blocks,
         "has_more": bool(payload.get("has_more")),
-        "next_cursor": str(payload.get("next_cursor") or ""),
+        "next_cursor": _notion_response_cursor(payload),
     }
 
 
@@ -2545,27 +2590,60 @@ def call_notion(
     if action == "get_schema":
         schema = _notion_api("GET", f"/data_sources/{data_source_id}")
         schema_properties = schema.get("properties")
-        if not isinstance(schema_properties, dict):
+        if not isinstance(schema_properties, dict) or not all(
+            isinstance(name, str) and len(name) <= 200 for name in schema_properties
+        ):
             raise RuntimeError("Notion data source schema is unavailable")
-        names = sorted(str(name) for name in schema_properties)
+        names = sorted(schema_properties)
         offset = int(start_cursor or "0")
-        schema_page_size = min(page_size, 10)
-        selected_names = names[offset : offset + schema_page_size]
-        next_offset = offset + len(selected_names)
-        has_more = next_offset < len(names)
-        return _bounded_result(
-            {
-                "id": data_source_id,
-                "title": _notion_plain_text(schema.get("title")),
-                "properties": {
-                    name: _compact_notion_schema_property(schema_properties[name])
-                    for name in selected_names
-                    if isinstance(schema_properties.get(name), dict)
-                },
-                "has_more": has_more,
-                "next_cursor": str(next_offset) if has_more else "",
+        title = _notion_plain_text(schema.get("title"))
+        properties_page: dict[str, Any] = {}
+        next_offset = offset
+        while next_offset < len(names) and len(properties_page) < min(page_size, 10):
+            name = names[next_offset]
+            value = schema_properties[name]
+            if not isinstance(value, dict):
+                next_offset += 1
+                continue
+            candidate_properties = {
+                **properties_page,
+                name: _compact_notion_schema_property(value),
             }
-        )
+            candidate_offset = next_offset + 1
+            candidate = {
+                "id": data_source_id,
+                "title": title,
+                "properties": candidate_properties,
+                "has_more": candidate_offset < len(names),
+                "next_cursor": (
+                    str(candidate_offset) if candidate_offset < len(names) else ""
+                ),
+            }
+            if (
+                len(json.dumps(candidate, ensure_ascii=True).encode("utf-8"))
+                > NOTION_SCHEMA_RESULT_MAX
+            ):
+                if not properties_page:
+                    raise RuntimeError(
+                        "One Notion schema property exceeds the transport bound"
+                    )
+                break
+            properties_page = candidate_properties
+            next_offset = candidate_offset
+        has_more = next_offset < len(names)
+        result = {
+            "id": data_source_id,
+            "title": title,
+            "properties": properties_page,
+            "has_more": has_more,
+            "next_cursor": str(next_offset) if has_more else "",
+        }
+        if (
+            len(json.dumps(result, ensure_ascii=True).encode("utf-8"))
+            > NOTION_SCHEMA_RESULT_MAX
+        ):
+            raise RuntimeError("Notion schema page exceeds the transport bound")
+        return result
     if action == "query":
         body: dict[str, Any] = {"page_size": page_size}
         if filter_value:
@@ -2583,7 +2661,7 @@ def call_notion(
                     if isinstance(page, dict)
                 ],
                 "has_more": bool(response.get("has_more")),
-                "next_cursor": response.get("next_cursor"),
+                "next_cursor": _notion_response_cursor(response),
             }
         )
     if action == "fetch_blocks":
@@ -2686,6 +2764,9 @@ def call_notion_authorized(
         result = call_notion(payload, allowed_pages, allowed_blocks)
         registry.commit_notion_write(token, data_source, str(result.get("id", "")))
         return result
+    except NotionMutationAmbiguousError:
+        registry.poison_notion_write(token, data_source)
+        raise
     except Exception:
         registry.release_notion_write(token, data_source)
         raise

@@ -30,7 +30,8 @@ def notion_safe(
     page_id = str(page_id).strip()
     block_id = str(block_id).strip()
     page_size = int(page_size)
-    start_cursor = str(start_cursor).strip()
+    if not isinstance(start_cursor, str):
+        raise ValueError("start_cursor must be a string")
     content = str(content)
     if action not in ACTIONS:
         raise ValueError("unsupported Notion action")

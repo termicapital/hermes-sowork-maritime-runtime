@@ -443,6 +443,27 @@ class RuntimeContractTests(unittest.TestCase):
                     r._notion_api(method, path, body)
             self.assertEqual(urlopen.call_count, 1)
 
+    def test_ambiguous_notion_create_poisons_same_run_retry(self):
+        r = self.runtime
+        registry = r.RunCapabilityRegistry(ttl=60)
+        token = registry.issue(None, sender_id="owner", notion_write_allowed=True)
+        payload = {
+            "action": "create_page",
+            "data_source": "problem_signal",
+            "properties": {"Problem Statement": "Ambiguous"},
+        }
+        with patch.object(
+            r,
+            "call_notion",
+            side_effect=r.NotionMutationAmbiguousError("ambiguous mutation"),
+        ):
+            with self.assertRaises(r.NotionMutationAmbiguousError):
+                r.call_notion_authorized(registry, token, payload)
+        with patch.object(r, "call_notion") as notion:
+            with self.assertRaises(PermissionError):
+                r.call_notion_authorized(registry, token, payload)
+        notion.assert_not_called()
+
     def test_notion_fetch_rejects_unknown_page_before_upstream_read(self):
         r = self.runtime
         with patch.object(r, "_notion_api") as api:
@@ -504,6 +525,43 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertFalse(result["has_more"])
         self.assertIn("page_size=25", api.call_args.args[1])
         self.assertIn("start_cursor=" + "z" * 250, api.call_args.args[1])
+
+    def test_notion_cursors_are_exact_and_oversized_responses_fail_closed(self):
+        r = self.runtime
+        opaque = "  opaque+/= token  "
+        response = {"results": [], "has_more": True, "next_cursor": opaque}
+        with patch.object(r, "_notion_api", return_value=response) as api:
+            first = r.call_notion(
+                {
+                    "action": "query",
+                    "data_source": "discovery_pipeline",
+                    "page_size": 1,
+                }
+            )
+            self.assertEqual(first["next_cursor"], opaque)
+            r.call_notion(
+                {
+                    "action": "query",
+                    "data_source": "discovery_pipeline",
+                    "page_size": 1,
+                    "start_cursor": opaque,
+                }
+            )
+        self.assertEqual(api.call_args.args[2]["start_cursor"], opaque)
+        oversized = {
+            "results": [],
+            "has_more": True,
+            "next_cursor": "x" * (r.NOTION_CURSOR_MAX + 1),
+        }
+        with patch.object(r, "_notion_api", return_value=oversized):
+            with self.assertRaises(RuntimeError):
+                r.call_notion(
+                    {
+                        "action": "query",
+                        "data_source": "discovery_pipeline",
+                        "page_size": 1,
+                    }
+                )
 
     def test_rejected_notion_create_can_retry_and_relation_is_run_bound(self):
         r = self.runtime
@@ -583,7 +641,7 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_notion_schema_is_transport_bounded_with_actionable_pagination(self):
         r = self.runtime
-        options = [{"name": "x" * 100} for _ in range(100)]
+        options = [{"name": "界" * 100} for _ in range(100)]
         schema = {
             "title": [{"plain_text": "Large schema"}],
             "properties": {
@@ -612,9 +670,11 @@ class RuntimeContractTests(unittest.TestCase):
                 }
             )
         self.assertTrue(first["has_more"])
-        self.assertEqual(first["next_cursor"], "10")
-        self.assertEqual(len(first["properties"]), 10)
-        self.assertEqual(len(second["properties"]), 10)
+        self.assertIn("properties", first)
+        self.assertIn("has_more", first)
+        self.assertIn("next_cursor", first)
+        self.assertGreater(len(first["properties"]), 0)
+        self.assertGreater(len(second["properties"]), 0)
         self.assertLess(len(json.dumps(first).encode()), 200_000)
 
     def test_sowork_meeting_paths_are_read_only_bounded_and_exclude_video(self):
