@@ -179,6 +179,175 @@ class SecureExpansionTests(unittest.TestCase):
         )
         self.assertLessEqual(len(out["citations"]), 20)
 
+    def test_standard_sonar_quota_error_falls_back_to_same_model_openrouter(self):
+        r = self.runtime
+        quota_error = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            401,
+            "insufficient_quota",
+            {},
+            io.BytesIO(b'{"error":{"code":"insufficient_quota"}}'),
+        )
+        fallback_result = {
+            "model": "perplexity/sonar",
+            "choices": [{"message": {"content": "Riyadh"}}],
+            "citations": ["https://example.com/riyadh"],
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(
+                r, "_provider_json", side_effect=[quota_error, fallback_result]
+            ) as provider,
+        ):
+            out = r.call_perplexity(
+                {
+                    "action": "chat",
+                    "prompt": "What is the capital of Saudi Arabia?",
+                    "model": "sonar",
+                    "max_tokens": 100,
+                }
+            )
+        self.assertEqual(provider.call_count, 2)
+        direct_call, fallback_call = provider.call_args_list
+        self.assertEqual(direct_call.args[0], "https://api.perplexity.ai/v1/sonar")
+        self.assertEqual(
+            fallback_call.args[:2],
+            (
+                "https://openrouter.ai/api/v1/chat/completions",
+                "OPENROUTER_API_KEY",
+            ),
+        )
+        self.assertEqual(fallback_call.args[2]["model"], "perplexity/sonar")
+        self.assertEqual(
+            fallback_call.args[2]["messages"], direct_call.args[2]["messages"]
+        )
+        self.assertEqual(
+            fallback_call.args[2]["max_tokens"], direct_call.args[2]["max_tokens"]
+        )
+        self.assertEqual(out["model"], "perplexity/sonar")
+        self.assertEqual(out["citations"], ["https://example.com/riyadh"])
+
+    def test_standard_sonar_missing_direct_key_uses_openrouter(self):
+        r = self.runtime
+        fallback_result = {
+            "model": "perplexity/sonar",
+            "choices": [{"message": {"content": "Riyadh"}}],
+            "citations": ["https://example.com/riyadh"],
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {"OPENROUTER_API_KEY": "openrouter-secret"},
+                clear=True,
+            ),
+            patch.object(
+                r, "_provider_json", return_value=fallback_result
+            ) as provider,
+        ):
+            out = r.call_perplexity(
+                {"action": "chat", "prompt": "q", "model": "sonar"}
+            )
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(
+            provider.call_args.args[:2],
+            (
+                "https://openrouter.ai/api/v1/chat/completions",
+                "OPENROUTER_API_KEY",
+            ),
+        )
+        self.assertEqual(out["model"], "perplexity/sonar")
+
+    def test_standard_sonar_openrouter_error_envelope_fails_closed(self):
+        r = self.runtime
+        quota_error = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            401,
+            "insufficient_quota",
+            {},
+            io.BytesIO(b"{}"),
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(
+                r,
+                "_provider_json",
+                side_effect=[quota_error, {"error": {"code": "invalid_request"}}],
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "OpenRouter sonar failed \\(invalid_request\\)"
+            ),
+        ):
+            r.call_perplexity(
+                {"action": "chat", "prompt": "q", "model": "sonar"}
+            )
+
+    def test_standard_sonar_symbolic_eligible_error_envelope_falls_back(self):
+        r = self.runtime
+        for code in ("authentication_error", "rate_limit_exceeded"):
+            with (
+                self.subTest(code=code),
+                patch.dict(
+                    os.environ,
+                    {
+                        "PERPLEXITY_API_KEY": "perplexity-secret",
+                        "OPENROUTER_API_KEY": "openrouter-secret",
+                    },
+                ),
+                patch.object(
+                    r,
+                    "_provider_json",
+                    side_effect=[
+                        {"error": {"code": code}},
+                        {
+                            "model": "perplexity/sonar",
+                            "choices": [{"message": {"content": "recovered"}}],
+                        },
+                    ],
+                ) as provider,
+            ):
+                out = r.call_perplexity(
+                    {"action": "chat", "prompt": "q", "model": "sonar"}
+                )
+            self.assertEqual(provider.call_count, 2)
+            self.assertEqual(out["choices"][0]["message"]["content"], "recovered")
+
+    def test_standard_sonar_http_409_does_not_fallback(self):
+        r = self.runtime
+        conflict = r.urllib.error.HTTPError(
+            "https://api.perplexity.ai/v1/sonar",
+            409,
+            "conflict",
+            {},
+            io.BytesIO(b"{}"),
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PERPLEXITY_API_KEY": "perplexity-secret",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+            ),
+            patch.object(r, "_provider_json", side_effect=conflict) as provider,
+            self.assertRaises(r.urllib.error.HTTPError),
+        ):
+            r.call_perplexity(
+                {"action": "chat", "prompt": "q", "model": "sonar"}
+            )
+        self.assertEqual(provider.call_count, 1)
+
     def test_perplexity_deep_research_falls_back_to_openrouter(self):
         r = self.runtime
         quota_error = r.urllib.error.HTTPError(
