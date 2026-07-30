@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Restricted read-only Asana tool; the raw token remains in the parent runtime."""
+
 from __future__ import annotations
 
-import json
-import urllib.request
-from pathlib import Path
-
 from tools.registry import registry
+from safe_proxy_client import proxy
 
-ENDPOINT = "http://127.0.0.1:8765/internal/asana/read"
-TOKEN_PATH = Path("/data/hermes/discovery-runtime/openrouter-proxy-token")
+
 ACTIONS = {
     "get_me",
     "list_projects",
@@ -46,31 +43,14 @@ def asana_read(
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
 
-    body = json.dumps({
+    payload = {
         "action": action,
         "project_gid": project_gid,
         "task_gid": task_gid,
         "query": query,
         "limit": limit,
-    }).encode("utf-8")
-    token = TOKEN_PATH.read_text(encoding="utf-8").strip()
-    if len(token) < 32:
-        raise RuntimeError("Asana proxy capability is unavailable")
-    request = urllib.request.Request(
-        ENDPOINT,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Discovery-Internal-Token": token,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        raw_response = response.read(100_001)
-    if len(raw_response) > 100_000:
-        raise RuntimeError("Asana proxy response exceeded 100 KB")
-    payload = json.loads(raw_response.decode("utf-8"))
-    return json.dumps(payload, ensure_ascii=False)
+    }
+    return proxy("/internal/asana/read", payload, timeout=60)
 
 
 SCHEMA = {

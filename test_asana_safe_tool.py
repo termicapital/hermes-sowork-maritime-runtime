@@ -1,7 +1,6 @@
 import importlib.util
 import json
 import sys
-import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -29,21 +28,22 @@ class AsanaSafeToolTests(unittest.TestCase):
 
     def test_read_calls_only_loopback_parent_endpoint(self):
         class Response:
-            def __enter__(self): return self
-            def __exit__(self, *_args): return None
-            def read(self, *_args): return json.dumps({"data": [{"gid": "1", "name": "Project"}]}).encode()
+            def __enter__(self):
+                return self
 
-        with tempfile.TemporaryDirectory() as tmp:
-            token_path = Path(tmp) / "token"
-            token_path.write_text("t" * 48)
-            with (
-                patch.object(self.module, "TOKEN_PATH", token_path),
-                patch.object(self.module.urllib.request, "urlopen", return_value=Response()) as urlopen,
-            ):
-                result = self.module.asana_read("list_projects", limit=10)
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "http://127.0.0.1:8765/internal/asana/read")
-        self.assertEqual(request.headers["X-discovery-internal-token"], "t" * 48)
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, *_args):
+                return json.dumps({"data": [{"gid": "1", "name": "Project"}]}).encode()
+
+        with patch.object(
+            self.module,
+            "proxy",
+            return_value=json.dumps({"data": [{"name": "Project"}]}),
+        ) as proxy:
+            result = self.module.asana_read("list_projects", limit=10)
+        self.assertEqual(proxy.call_args.args[0], "/internal/asana/read")
         self.assertEqual(json.loads(result)["data"][0]["name"], "Project")
 
     def test_local_validation_rejects_writes_and_bad_inputs(self):
@@ -61,7 +61,9 @@ class AsanaSafeToolTests(unittest.TestCase):
     def test_schema_exposes_no_mutation_action(self):
         actions = set(self.module.SCHEMA["parameters"]["properties"]["action"]["enum"])
         self.assertTrue({"list_projects", "list_tasks", "get_task"} <= actions)
-        self.assertFalse({"create_task", "update_task", "complete_task", "delete_task"} & actions)
+        self.assertFalse(
+            {"create_task", "update_task", "complete_task", "delete_task"} & actions
+        )
 
 
 if __name__ == "__main__":

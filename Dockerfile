@@ -3,7 +3,13 @@ FROM nousresearch/hermes-agent@sha256:d887ef6e9ee71f9f3700d23a01816ae38ac5b74436
 USER root
 COPY discovery_runtime.py /opt/discovery-runtime/discovery_runtime.py
 COPY openrouter_safe_tool.py /opt/hermes/tools/openrouter_safe_tool.py
+COPY safe_proxy_client.py /opt/hermes/safe_proxy_client.py
+COPY firecrawl_safe_tool.py /opt/hermes/tools/firecrawl_safe_tool.py
+COPY perplexity_safe_tool.py /opt/hermes/tools/perplexity_safe_tool.py
+COPY xai_safe_tool.py /opt/hermes/tools/xai_safe_tool.py
+COPY github_safe_tool.py /opt/hermes/tools/github_safe_tool.py
 COPY asana_safe_tool.py /opt/hermes/tools/asana_safe_tool.py
+COPY notion_safe_tool.py /opt/hermes/tools/notion_safe_tool.py
 COPY sowork_meetings_safe_tool.py /opt/hermes/tools/sowork_meetings_safe_tool.py
 COPY install_readonly_toolset.py /opt/discovery-runtime/install_readonly_toolset.py
 COPY --chmod=0755 entrypoint.sh /opt/discovery-runtime/entrypoint.sh
