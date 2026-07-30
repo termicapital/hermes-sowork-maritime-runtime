@@ -16,6 +16,7 @@ Credential-isolated Maritime runtime for a Hermes Discovery Scout in one approve
 - **xAI:** only `POST /v1/responses`, default/only model `grok-4.5`, and only `web_search`/`x_search`; no code interpreter, file search, or arbitrary tools.
 - **OpenRouter:** bounded live catalog from `GET /api/v1/models?output_modalities=all`; no static model allowlist. Calling the catalog creates a short-lived model-selection challenge. The agent must list models, ask the human for one exact model ID, and **STOP**. Generation is possible only in a later human-triggered run whose message contains exactly one exact live model ID and consumes that challenge. The parent validates output modality and dedicated Images API availability before spending. Supports text chat, dedicated image generations, and streaming audio. Bounded base64 media is stored under `/data/hermes/discovery-runtime/media` with random IDs, a seven-day/100-file retention bound, and read-only `GET /media/<id>` delivery. Returned URLs use the HTTPS `DISCOVERY_PUBLIC_BASE_URL`.
 - **GitHub:** fixed `api.github.com` routes for exactly `termicapital/discovery-scout` and `termicapital/hermes-sowork-maritime-runtime`. Reads cover metadata, branches, files, commits, issues, PRs, checks, and workflows. Before a write, `prepare_write` hashes the complete operation and returns an `APPROVE_GITHUB_WRITE <digest>` marker; only Guillermo's later exact marker reply authorizes that byte-equivalent operation. Writes can create `agent/*` branches, upsert/delete bounded safe paths, and open/update PRs whose head is `agent/*`. Main/master/default writes, force, merge, releases, settings, secrets, and workflow mutation are unavailable.
+- **Notion:** the credential remains parent-side. Reads are restricted to the Discovery Pipeline, Problem Signal Capture, and fixed Discovery Pipeline Meetings page. Page IDs must first be learned from an approved query; nested block IDs must first be learned from an approved page/block read. Page and block results expose bounded `has_more`/`next_cursor` pagination rather than silently truncating. Explicit requests from the single configured owner containing `--autonomous` may create at most one quality-gated row in each of the two approved data sources per run; failed validation or upstream errors release the reservation for an autonomous retry. Pipeline relations may reference only the Problem Signal row created in that same run. Interactive runs cannot write. Update, delete, owner assignment, schema mutation, workspace-wide search, and new select-option creation are unavailable.
 
 ## Endpoints
 
@@ -36,6 +37,7 @@ Secrets:
 - `XAI_API_KEY`
 - `PERPLEXITY_API_KEY`
 - `GITHUB_TOKEN`
+- `NOTION_API_TOKEN`
 
 Non-secret:
 

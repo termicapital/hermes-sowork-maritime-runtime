@@ -15,6 +15,7 @@ assert set(resolve_toolset('perplexity_safe')) == {'perplexity_safe'}
 assert set(resolve_toolset('xai_safe')) == {'xai_safe'}
 assert set(resolve_toolset('github_safe')) == {'github_safe'}
 assert set(resolve_toolset('asana_safe')) == {'asana_read'}
+assert set(resolve_toolset('notion_safe')) == {'notion_safe'}
 assert set(resolve_toolset('sowork_meetings_safe')) == {'sowork_meetings_read'}
 print('skills_readonly', resolve_toolset('skills_readonly'))
 PY
@@ -24,6 +25,7 @@ required = [
     'SOWORK_CHANNEL_ID', 'SOWORK_ALLOWED_USER_IDS', 'SOWORK_API_TOKEN',
     'HERMES_CODEX_AUTH_B64', 'OPENROUTER_API_KEY', 'ASANA_TOKEN',
     'FIRECRAWL_API_KEY', 'XAI_API_KEY', 'PERPLEXITY_API_KEY', 'GITHUB_TOKEN',
+    'NOTION_API_TOKEN',
     'GITHUB_WRITE_ALLOWED_USER_IDS', 'DISCOVERY_PUBLIC_BASE_URL'
 ]
 present = {key: bool(os.getenv(key, '').strip()) for key in required}

@@ -37,6 +37,8 @@ class ReadonlyToolsetInstallerTests(unittest.TestCase):
         self.assertIn('"github_safe"', patched)
         self.assertIn('"asana_safe"', patched)
         self.assertIn('"asana_read"', patched)
+        self.assertIn('"notion_safe"', patched)
+        self.assertIn('"tools": ["notion_safe"]', patched)
         self.assertIn('"sowork_meetings_safe"', patched)
         self.assertIn('"sowork_meetings_read"', patched)
 

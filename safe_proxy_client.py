@@ -11,12 +11,19 @@ from typing import Any
 MAX_RESULT_CHARS = 200_000
 
 
-def proxy(path: str, payload: dict[str, Any], timeout: int = 300) -> str:
+def proxy(
+    path: str,
+    payload: dict[str, Any],
+    timeout: int = 300,
+    max_request_bytes: int = 64_000,
+) -> str:
     if not path.startswith("/internal/") or "://" in path:
         raise ValueError("invalid internal route")
+    if not 1 <= max_request_bytes <= 200_000:
+        raise ValueError("invalid request bound")
     raw = json.dumps(payload, separators=(",", ":")).encode()
-    if len(raw) > 64_000:
-        raise ValueError("request exceeds 64 KB")
+    if len(raw) > max_request_bytes:
+        raise ValueError("request exceeds configured bound")
     token_path = os.environ.get("HERMES_RUN_CAPABILITY_PATH", "")
     if not token_path:
         raise RuntimeError("run capability is unavailable")

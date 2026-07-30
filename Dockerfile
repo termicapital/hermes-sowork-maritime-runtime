@@ -9,6 +9,7 @@ COPY perplexity_safe_tool.py /opt/hermes/tools/perplexity_safe_tool.py
 COPY xai_safe_tool.py /opt/hermes/tools/xai_safe_tool.py
 COPY github_safe_tool.py /opt/hermes/tools/github_safe_tool.py
 COPY asana_safe_tool.py /opt/hermes/tools/asana_safe_tool.py
+COPY notion_safe_tool.py /opt/hermes/tools/notion_safe_tool.py
 COPY sowork_meetings_safe_tool.py /opt/hermes/tools/sowork_meetings_safe_tool.py
 COPY install_readonly_toolset.py /opt/discovery-runtime/install_readonly_toolset.py
 COPY --chmod=0755 entrypoint.sh /opt/discovery-runtime/entrypoint.sh

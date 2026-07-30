@@ -49,6 +49,12 @@ BLOCK = """    "skills_readonly": {
         "includes": []
     },
 
+    "notion_safe": {
+        "description": "Bounded Discovery Notion access through a parent-held credential",
+        "tools": ["notion_safe"],
+        "includes": []
+    },
+
     "sowork_meetings_safe": {
         "description": "Read-only SoWork Meeting Library access through the parent bridge",
         "tools": ["sowork_meetings_read"],
@@ -65,6 +71,7 @@ TOOLSET_NAMES = {
     "xai_safe",
     "github_safe",
     "asana_safe",
+    "notion_safe",
     "sowork_meetings_safe",
 }
 

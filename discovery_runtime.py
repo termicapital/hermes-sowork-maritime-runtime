@@ -35,6 +35,13 @@ from typing import Any, Callable, Mapping
 BASE_URL = "https://api.sowork.com/public"
 ASANA_BASE_URL = "https://app.asana.com/api/1.0"
 ASANA_WORKSPACE_GID = "1209552040826957"
+NOTION_BASE_URL = "https://api.notion.com/v1"
+NOTION_VERSION = "2025-09-03"
+NOTION_DATA_SOURCES = {
+    "problem_signal": "fc466b72-eaec-4ac9-b692-5e745966f1d4",
+    "discovery_pipeline": "5e6f6355-ec64-4950-b1cb-66806ef24401",
+}
+NOTION_MEETINGS_PAGE_ID = "36849bc8-1500-8015-9ec7-c442e0ddbc0e"
 AGENT_PREFIX = "Discovery Scout —"
 TRIGGER_RE = re.compile(
     r"(?:^\s*/scout(?:\s|$)|@discoveryscout\b|^\s*discovery\s+scout\s*[:—-])",
@@ -319,6 +326,20 @@ def is_trigger(message: dict[str, Any], config: Config) -> bool:
     )
 
 
+def is_autonomous_request(text: str) -> bool:
+    return bool(re.search(r"(?<!\S)--autonomous(?:\s|$)", str(text), re.IGNORECASE))
+
+
+def autonomous_notion_write_allowed(
+    config: Config, sender_id: str, human_text: str
+) -> bool:
+    return bool(
+        sender_id
+        and sender_id in config.github_write_allowed_user_ids
+        and is_autonomous_request(human_text)
+    )
+
+
 def recent_context(messages: list[dict[str, Any]], config: Config) -> str:
     rows = []
     for item in messages[-config.max_context_messages :]:
@@ -344,7 +365,7 @@ def build_prompt(target: dict[str, Any], context: str, config: Config) -> str:
         {context}
         </group-context>
 
-        Follow the discovery-scout skill. Use focused Q&A unless the request clearly asks for a full Stage 0/1.1 run. Load any other relevant installed skills before acting. Main inference must remain the configured OpenAI Codex provider. Safe parent proxies are available for Firecrawl search/scrape, Perplexity search/chat (including sonar-deep-research when the methodology directly instructs deep research), xAI Responses web/X research, the live OpenRouter catalog and generation, and two exact GitHub repositories. For OpenRouter generation, first list the live catalog, ask the human to reply with the exact catalog model ID, then STOP. Generation is unavailable in that run. Only after a later triggering HUMAN message contains exactly one exact catalog model ID may you use that same model; never infer, shorten, substitute, or approve a model yourself. GitHub reads are available for the two approved repositories. For any GitHub mutation, call github_safe with action=prepare_write and the complete intended write payload, show Guillermo the exact proposed change plus the returned APPROVE_GITHUB_WRITE marker, then STOP. Execute the identical write only after Guillermo replies with that exact marker; any payload difference is rejected by the parent. Read-only access to the approved Suhail Asana workspace is available through asana_read. It cannot create, edit, assign, move, complete, or delete tasks; any proposed Asana change requires Guillermo's approval of the exact changes before a separate write capability may be used. Read-only access to ended meetings in the SoWork Meeting Library is available through sowork_meetings_read. Use it to list/search meetings and retrieve API-exposed notes, transcripts, and meeting chat. Distinguish generated notes from raw transcripts, never claim unavailable transcript content exists, and do not request or return recording/video URLs.
+        Follow the discovery-scout skill. Use focused Q&A unless the request clearly asks for a full Stage 0/1.1 run. Load any other relevant installed skills before acting. Main inference must remain the configured OpenAI Codex provider. Safe parent proxies are available for Firecrawl search/scrape, Perplexity search/chat (including sonar-deep-research when the methodology directly instructs deep research), xAI Responses web/X research, the live OpenRouter catalog and generation, the approved Discovery Pipeline and Problem Signal Capture data sources through notion_safe, and two exact GitHub repositories. notion_safe replaces the unavailable mcp__notion__* tools named in the skill: use it for Phase 0 reads, the fixed Discovery Pipeline Meetings page, and Phase 6 writes. An explicit owner request containing --autonomous authorizes quality-gated create_page calls to only those two data sources, so complete the full run without asking for intermediate selection, draft, or write approvals; interactive runs remain read-only until separately approved. For OpenRouter generation, first list the live catalog, ask the human to reply with the exact catalog model ID, then STOP. Generation is unavailable in that run. Only after a later triggering HUMAN message contains exactly one exact catalog model ID may you use that same model; never infer, shorten, substitute, or approve a model yourself. GitHub reads are available for the two approved repositories. For any GitHub mutation, call github_safe with action=prepare_write and the complete intended write payload, show Guillermo the exact proposed change plus the returned APPROVE_GITHUB_WRITE marker, then STOP. Execute the identical write only after Guillermo replies with that exact marker; any payload difference is rejected by the parent. Read-only access to the approved Suhail Asana workspace is available through asana_read. It cannot create, edit, assign, move, complete, or delete tasks; any proposed Asana change requires Guillermo's approval of the exact changes before a separate write capability may be used. Read-only access to ended meetings in the SoWork Meeting Library is available through sowork_meetings_read. Use it to list/search meetings and retrieve API-exposed notes, transcripts, and meeting chat. Distinguish generated notes from raw transcripts, never claim unavailable transcript content exists, and do not request or return recording/video URLs.
 
         For every request that generates, creates, or edits one or more images, the final answer MUST include each generated image's safe public HTTPS URL on its own line in the form "Image URL: https://...". Never return a local path, file:// URL, data URL, or inaccessible internal URL. If the image tool does not provide a public HTTPS URL, do not claim that the image was delivered: retry with an approved public-URL-producing image provider when possible, otherwise state clearly that no deliverable URL was produced.
 
@@ -457,7 +478,8 @@ def agent_toolsets() -> str:
     """
     return (
         "web,image_gen,vision,skills_readonly,openrouter_safe,firecrawl_safe,"
-        "perplexity_safe,xai_safe,github_safe,asana_safe,sowork_meetings_safe,todo"
+        "perplexity_safe,xai_safe,github_safe,asana_safe,notion_safe,"
+        "sowork_meetings_safe,todo"
     )
 
 
@@ -502,6 +524,9 @@ def run_agent(
             model,
             github_write_digest=github_write_digest,
             sender_id=sender_id,
+            notion_write_allowed=autonomous_notion_write_allowed(
+                config, sender_id, human_text
+            ),
         )
         run_dir = config.data_dir / "run-capabilities"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1325,13 +1350,15 @@ class RunCapabilityRegistry:
     def __init__(self, ttl: int = 3600):
         self.ttl = ttl
         self._lock = threading.Lock()
-        self._entries: dict[str, tuple[float, str | None, str | None, str]] = {}
+        self._entries: dict[str, tuple[float, str | None, str | None, str, bool]] = {}
+        self._notion_state: dict[str, dict[str, Any]] = {}
 
     def issue(
         self,
         model: str | None,
         github_write_digest: str | None = None,
         sender_id: str = "",
+        notion_write_allowed: bool = False,
     ) -> str:
         if github_write_digest is not None and not re.fullmatch(
             r"[0-9a-f]{64}", github_write_digest
@@ -1341,12 +1368,23 @@ class RunCapabilityRegistry:
         with self._lock:
             now = time.monotonic()
             self._entries = {k: v for k, v in self._entries.items() if v[0] > now}
+            self._notion_state = {
+                k: v for k, v in self._notion_state.items() if k in self._entries
+            }
             self._entries[token] = (
                 now + self.ttl,
                 model,
                 github_write_digest,
                 sender_id,
+                bool(notion_write_allowed),
             )
+            self._notion_state[token] = {
+                "reserved": set(),
+                "used": set(),
+                "created": {},
+                "known_pages": set(),
+                "known_blocks": set(),
+            }
         return token
 
     def authorize(self, token: str) -> str | None:
@@ -1376,6 +1414,81 @@ class RunCapabilityRegistry:
                 raise PermissionError("invalid or expired run capability")
             return entry[3]
 
+    def reserve_notion_write(self, token: str, data_source: str) -> None:
+        with self._lock:
+            entry = self._entries.get(token)
+            if not entry or entry[0] <= time.monotonic():
+                self._entries.pop(token, None)
+                raise PermissionError("invalid or expired run capability")
+            if not entry[4]:
+                raise PermissionError(
+                    "Notion writes require an explicit owner --autonomous run"
+                )
+            if data_source not in NOTION_DATA_SOURCES:
+                raise PermissionError("Notion write target is not approved")
+            state = self._notion_state.get(token)
+            if state is None:
+                raise PermissionError("invalid or expired run capability")
+            if data_source in state["used"] or data_source in state["reserved"]:
+                raise PermissionError(
+                    "Notion autonomous runs allow one create per approved data source"
+                )
+            state["reserved"].add(data_source)
+
+    def commit_notion_write(self, token: str, data_source: str, page_id: str) -> None:
+        normalized_page_id = _notion_uuid(page_id)
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None or data_source not in state["reserved"]:
+                raise PermissionError("Notion write was not reserved")
+            state["reserved"].remove(data_source)
+            state["used"].add(data_source)
+            state["created"][data_source] = normalized_page_id
+            state["known_pages"].add(normalized_page_id)
+
+    def release_notion_write(self, token: str, data_source: str) -> None:
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is not None:
+                state["reserved"].discard(data_source)
+
+    def notion_created_page(self, token: str, data_source: str) -> str | None:
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None:
+                raise PermissionError("invalid or expired run capability")
+            return state["created"].get(data_source)
+
+    def add_notion_known_pages(self, token: str, page_ids: list[str]) -> None:
+        normalized = {_notion_uuid(page_id) for page_id in page_ids[:100]}
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None:
+                raise PermissionError("invalid or expired run capability")
+            state["known_pages"].update(normalized)
+
+    def notion_known_pages(self, token: str) -> frozenset[str]:
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None:
+                raise PermissionError("invalid or expired run capability")
+            return frozenset(state["known_pages"])
+
+    def add_notion_known_blocks(self, token: str, block_ids: list[str]) -> None:
+        normalized = {_notion_uuid(block_id) for block_id in block_ids[:100]}
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None:
+                raise PermissionError("invalid or expired run capability")
+            state["known_blocks"].update(normalized)
+
+    def notion_known_blocks(self, token: str) -> frozenset[str]:
+        with self._lock:
+            state = self._notion_state.get(token)
+            if state is None:
+                raise PermissionError("invalid or expired run capability")
+            return frozenset(state["known_blocks"])
+
     def require_model(self, token: str, model: str) -> None:
         if self.authorize(token) != model:
             raise PermissionError("run capability is not bound to this model")
@@ -1383,6 +1496,7 @@ class RunCapabilityRegistry:
     def revoke(self, token: str) -> None:
         with self._lock:
             self._entries.pop(token, None)
+            self._notion_state.pop(token, None)
 
 
 class ModelSelectionChallenges:
@@ -1868,6 +1982,715 @@ def call_github(payload: dict[str, Any]) -> Any:
     return _bounded_result(json.loads(raw.decode()) if raw else {})
 
 
+NOTION_ACTIONS = {
+    "get_schema",
+    "query",
+    "fetch_page",
+    "fetch_blocks",
+    "create_page",
+}
+NOTION_UUID_RE = re.compile(
+    r"(?i)([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?"
+    r"([0-9a-f]{4})-?([0-9a-f]{12})"
+)
+NOTION_WRITABLE_TYPES = {
+    "title",
+    "rich_text",
+    "number",
+    "select",
+    "status",
+    "multi_select",
+    "date",
+    "url",
+    "email",
+    "phone_number",
+    "checkbox",
+    "relation",
+    "files",
+}
+NOTION_CURSOR_MAX = 10_000
+
+
+def _notion_uuid(value: Any) -> str:
+    matches = list(NOTION_UUID_RE.finditer(str(value or "")))
+    if not matches:
+        raise ValueError("valid Notion UUID or page URL required")
+    parts = matches[-1].groups()
+    return "-".join(part.lower() for part in parts)
+
+
+def _bounded_json_shape(value: Any, depth: int = 0) -> None:
+    if depth > 8:
+        raise ValueError("Notion filter exceeds maximum depth")
+    if isinstance(value, dict):
+        if len(value) > 100:
+            raise ValueError("Notion object has too many fields")
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > 200:
+                raise ValueError("invalid Notion object key")
+            _bounded_json_shape(item, depth + 1)
+    elif isinstance(value, list):
+        if len(value) > 100:
+            raise ValueError("Notion list has too many items")
+        for item in value:
+            _bounded_json_shape(item, depth + 1)
+    elif value is not None and not isinstance(value, (str, bool, int, float)):
+        raise ValueError("unsupported Notion value")
+    elif isinstance(value, str) and len(value) > 10_000:
+        raise ValueError("Notion value exceeds 10,000 characters")
+
+
+def validate_notion_payload(payload: dict[str, Any]) -> tuple[Any, ...]:
+    action = str(payload.get("action", "")).strip()
+    alias = str(payload.get("data_source", "")).strip()
+    page_id = str(payload.get("page_id", "")).strip()
+    block_id = str(payload.get("block_id", "")).strip()
+    filter_value = payload.get("filter") or {}
+    sorts = payload.get("sorts") or []
+    properties = payload.get("properties") or {}
+    content = str(payload.get("content", ""))
+    start_cursor = str(payload.get("start_cursor", "")).strip()
+    try:
+        page_size = int(payload.get("page_size", 100))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid page_size") from exc
+    if action not in NOTION_ACTIONS:
+        raise ValueError("unsupported Notion action")
+    if action in {"get_schema", "query", "create_page"}:
+        if alias not in NOTION_DATA_SOURCES:
+            raise ValueError("approved data_source alias required")
+        data_source_id = NOTION_DATA_SOURCES[alias]
+    else:
+        data_source_id = ""
+    if action == "fetch_page":
+        page_id = _notion_uuid(page_id)
+    elif page_id:
+        raise ValueError("page_id is only valid for fetch_page")
+    if action == "fetch_blocks":
+        block_id = _notion_uuid(block_id)
+    elif block_id:
+        raise ValueError("block_id is only valid for fetch_blocks")
+    if not isinstance(filter_value, dict) or not isinstance(sorts, list):
+        raise ValueError("filter and sorts have invalid types")
+    if not isinstance(properties, dict):
+        raise ValueError("properties must be an object")
+    if not 1 <= page_size <= 100:
+        raise ValueError("page_size must be between 1 and 100")
+    if len(start_cursor) > NOTION_CURSOR_MAX:
+        raise ValueError(f"start_cursor exceeds {NOTION_CURSOR_MAX:,} characters")
+    if len(content) > 80_000:
+        raise ValueError("content exceeds 80,000 characters")
+    if action == "create_page" and not properties:
+        raise ValueError("properties are required for create_page")
+    if action != "create_page" and (properties or content):
+        raise ValueError("properties/content are only valid for create_page")
+    if action != "query" and (filter_value or sorts):
+        raise ValueError("filter and sorts are only valid for query")
+    if (
+        action not in {"get_schema", "query", "fetch_page", "fetch_blocks"}
+        and start_cursor
+    ):
+        raise ValueError("start_cursor is only valid for paginated reads")
+    if (
+        action == "get_schema"
+        and start_cursor
+        and not re.fullmatch(r"[0-9]{1,7}", start_cursor)
+    ):
+        raise ValueError("get_schema cursor is invalid")
+    _bounded_json_shape(filter_value)
+    _bounded_json_shape(sorts)
+    _bounded_json_shape(properties)
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > 200_000:
+        raise ValueError("Notion request exceeds 200 KB")
+    return (
+        action,
+        data_source_id,
+        page_id,
+        filter_value,
+        sorts,
+        page_size,
+        start_cursor,
+        properties,
+        content,
+        block_id,
+    )
+
+
+def _notion_rich_text(value: Any, maximum: int = 10_000) -> list[dict[str, Any]]:
+    text = str(value or "").strip()
+    if len(text) > maximum:
+        raise ValueError(f"Notion text exceeds {maximum:,} characters")
+    return [
+        {"type": "text", "text": {"content": text[index : index + 2000]}}
+        for index in range(0, len(text), 2000)
+    ]
+
+
+def normalize_notion_properties(
+    values: dict[str, Any], schema: dict[str, Any]
+) -> dict[str, Any]:
+    if not values or len(values) > 100:
+        raise ValueError("properties must contain 1 to 100 fields")
+    normalized: dict[str, Any] = {}
+    for name, value in values.items():
+        if name not in schema:
+            raise ValueError(f"unknown Notion property: {str(name)[:100]}")
+        property_type = str(schema[name].get("type", ""))
+        if property_type not in NOTION_WRITABLE_TYPES:
+            raise ValueError(f"Notion property is read-only: {str(name)[:100]}")
+        if property_type in {"title", "rich_text"}:
+            if property_type == "title" and not str(value or "").strip():
+                raise ValueError(f"Notion title required for {name}")
+            normalized[name] = {
+                property_type: _notion_rich_text(
+                    value, 500 if property_type == "title" else 10_000
+                )
+            }
+        elif property_type == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"Notion number required for {name}")
+            normalized[name] = {"number": value}
+        elif property_type in {"select", "status"}:
+            option = str(value or "").strip()
+            if not option or len(option) > 100:
+                raise ValueError(f"invalid Notion option for {name}")
+            option_config = schema[name].get(property_type)
+            configured = (
+                {
+                    str(item.get("name", ""))
+                    for item in option_config.get("options", [])
+                    if isinstance(item, dict)
+                }
+                if isinstance(option_config, dict)
+                else set()
+            )
+            if option not in configured:
+                raise ValueError(f"unknown configured Notion option for {name}")
+            normalized[name] = {property_type: {"name": option}}
+        elif property_type == "multi_select":
+            if not isinstance(value, list) or len(value) > 100:
+                raise ValueError(f"Notion list required for {name}")
+            options = []
+            option_config = schema[name].get("multi_select")
+            configured = (
+                {
+                    str(item.get("name", ""))
+                    for item in option_config.get("options", [])
+                    if isinstance(item, dict)
+                }
+                if isinstance(option_config, dict)
+                else set()
+            )
+            for item in value:
+                option = str(item or "").strip()
+                if not option or len(option) > 100:
+                    raise ValueError(f"invalid Notion option for {name}")
+                if option not in configured:
+                    raise ValueError(f"unknown configured Notion option for {name}")
+                options.append({"name": option})
+            normalized[name] = {"multi_select": options}
+        elif property_type == "date":
+            date_value = {"start": value} if isinstance(value, str) else value
+            if (
+                not isinstance(date_value, dict)
+                or not str(date_value.get("start", "")).strip()
+            ):
+                raise ValueError(f"invalid Notion date for {name}")
+            normalized[name] = {
+                "date": {
+                    key: date_value[key]
+                    for key in ("start", "end", "time_zone")
+                    if key in date_value and date_value[key] is not None
+                }
+            }
+        elif property_type in {"url", "email", "phone_number"}:
+            text = str(value or "").strip()
+            if not text or len(text) > 2000:
+                raise ValueError(f"invalid Notion {property_type} for {name}")
+            if property_type == "url" and _citation_url(text) is None:
+                raise ValueError(f"public HTTP(S) URL required for {name}")
+            normalized[name] = {property_type: text}
+        elif property_type == "checkbox":
+            if not isinstance(value, bool):
+                raise ValueError(f"Notion checkbox required for {name}")
+            normalized[name] = {"checkbox": value}
+        elif property_type == "relation":
+            if name != "Problem Signal":
+                raise ValueError(
+                    "only the approved Problem Signal relation is writable"
+                )
+            relation_config = schema[name].get("relation")
+            relation_target = (
+                relation_config.get("data_source_id")
+                if isinstance(relation_config, dict)
+                else None
+            )
+            if not relation_target or _notion_uuid(relation_target) != _notion_uuid(
+                NOTION_DATA_SOURCES["problem_signal"]
+            ):
+                raise ValueError("Notion relation target is outside the approved scope")
+            if not isinstance(value, list) or len(value) != 1:
+                raise ValueError(f"single Notion relation ID required for {name}")
+            normalized[name] = {
+                property_type: [{"id": _notion_uuid(item)} for item in value]
+            }
+        elif property_type == "files":
+            if not isinstance(value, list) or len(value) > 20:
+                raise ValueError(f"Notion URL list required for {name}")
+            files = []
+            for index, item in enumerate(value, 1):
+                url = _citation_url(item)
+                if url is None:
+                    raise ValueError(f"public HTTP(S) URL required for {name}")
+                files.append(
+                    {
+                        "name": f"Reference {index}",
+                        "type": "external",
+                        "external": {"url": url},
+                    }
+                )
+            normalized[name] = {"files": files}
+    return normalized
+
+
+def markdown_to_notion_blocks(content: str) -> list[dict[str, Any]]:
+    if len(content) > 80_000:
+        raise ValueError("content exceeds 80,000 characters")
+    blocks: list[dict[str, Any]] = []
+    in_code = False
+    code_lines: list[str] = []
+
+    def add_block(block_type: str, text: str) -> None:
+        if not text.strip():
+            return
+        for index in range(0, len(text), 10_000):
+            chunk = text[index : index + 10_000]
+            data_key = block_type
+            block = {
+                "object": "block",
+                "type": block_type,
+                data_key: {"rich_text": _notion_rich_text(chunk)},
+            }
+            if block_type == "code":
+                block[data_key]["language"] = "plain text"
+            blocks.append(block)
+
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("```"):
+            if in_code:
+                add_block("code", "\n".join(code_lines))
+                code_lines = []
+            in_code = not in_code
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        if not line.strip():
+            continue
+        if line.startswith("### "):
+            add_block("heading_3", line[4:])
+        elif line.startswith("## "):
+            add_block("heading_2", line[3:])
+        elif line.startswith("# "):
+            add_block("heading_1", line[2:])
+        elif re.match(r"^\s*[-*]\s+", line):
+            add_block("bulleted_list_item", re.sub(r"^\s*[-*]\s+", "", line))
+        elif re.match(r"^\s*\d+[.)]\s+", line):
+            add_block("numbered_list_item", re.sub(r"^\s*\d+[.)]\s+", "", line))
+        elif line.startswith("> "):
+            add_block("quote", line[2:])
+        else:
+            add_block("paragraph", line)
+        if len(blocks) > 1000:
+            raise ValueError("Notion content exceeds 1,000 blocks")
+    if in_code and code_lines:
+        add_block("code", "\n".join(code_lines))
+    if len(blocks) > 1000:
+        raise ValueError("Notion content exceeds 1,000 blocks")
+    return blocks
+
+
+def _notion_api(
+    method: str, path: str, body: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    token = os.environ.get("NOTION_API_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("Notion is not configured")
+    encoded = (
+        json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+        if body is not None
+        else None
+    )
+    if encoded is not None and len(encoded) > 500_000:
+        raise ValueError("Notion upstream request exceeds 500 KB")
+    retry_safe = bool(
+        method == "GET"
+        or (method == "POST" and path.endswith("/query"))
+        or (
+            method == "PATCH"
+            and path.startswith("/pages/")
+            and body == {"in_trash": True}
+        )
+    )
+    for attempt in range(3):
+        request = urllib.request.Request(
+            NOTION_BASE_URL + path,
+            data=encoded,
+            method=method,
+            headers={
+                "Authorization": "Bearer " + token,
+                "Notion-Version": NOTION_VERSION,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Suhail-Discovery-Scout-Maritime/2.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                raw = response.read(MAX_UPSTREAM_BYTES + 1)
+            if len(raw) > MAX_UPSTREAM_BYTES:
+                raise RuntimeError("Notion response exceeded 2 MB")
+            parsed = json.loads(raw.decode("utf-8")) if raw else {}
+            if not isinstance(parsed, dict):
+                raise RuntimeError("Notion returned an invalid response")
+            return parsed
+        except urllib.error.HTTPError as exc:
+            raw = exc.read(4097)
+            code = "request_failed"
+            with contextlib.suppress(Exception):
+                parsed_error = json.loads(raw[:4096].decode("utf-8"))
+                candidate = str(parsed_error.get("code", ""))
+                if re.fullmatch(r"[A-Za-z0-9_.-]{1,60}", candidate):
+                    code = candidate
+            if exc.code == 429 or (retry_safe and 500 <= exc.code <= 599):
+                if attempt < 2:
+                    retry_after = exc.headers.get("Retry-After", "1")
+                    try:
+                        delay = min(5.0, max(0.5, float(retry_after)))
+                    except ValueError:
+                        delay = 1.0
+                    time.sleep(delay)
+                    continue
+            if 400 <= exc.code <= 499:
+                raise ValueError(f"Notion rejected the request ({code})") from exc
+            raise RuntimeError(f"Notion request failed ({code})") from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if retry_safe and attempt < 2:
+                time.sleep(attempt + 1)
+                continue
+            raise RuntimeError("Notion request failed (transient)") from exc
+    raise RuntimeError("Notion request failed")
+
+
+def _notion_plain_text(items: Any) -> str:
+    if not isinstance(items, list):
+        return ""
+    return "".join(
+        str(item.get("plain_text", "")) for item in items if isinstance(item, dict)
+    )[:10_000]
+
+
+def _compact_notion_property(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return None
+    property_type = str(value.get("type", ""))
+    data = value.get(property_type)
+    if property_type in {"title", "rich_text"}:
+        return _notion_plain_text(data)
+    if property_type in {"number", "checkbox", "url", "email", "phone_number"}:
+        return data
+    if property_type in {"select", "status"}:
+        return data.get("name") if isinstance(data, dict) else None
+    if property_type == "multi_select":
+        return (
+            [item.get("name") for item in data if isinstance(item, dict)]
+            if isinstance(data, list)
+            else []
+        )
+    if property_type == "date":
+        return data if isinstance(data, dict) else None
+    if property_type in {"relation", "people"}:
+        return (
+            [item.get("id") for item in data if isinstance(item, dict)]
+            if isinstance(data, list)
+            else []
+        )
+    if property_type == "files":
+        files = []
+        for item in data if isinstance(data, list) else []:
+            if not isinstance(item, dict):
+                continue
+            file_type = item.get("type")
+            location = (
+                item.get(file_type) if file_type in {"file", "external"} else None
+            )
+            url = location.get("url") if isinstance(location, dict) else None
+            if _citation_url(url):
+                files.append(url)
+        return files
+    if property_type == "formula" and isinstance(data, dict):
+        formula_type = data.get("type")
+        return (
+            data.get(formula_type)
+            if formula_type in {"string", "number", "boolean", "date"}
+            else None
+        )
+    return None
+
+
+def _compact_notion_schema_property(value: dict[str, Any]) -> dict[str, Any]:
+    property_type = str(value.get("type", ""))
+    compact: dict[str, Any] = {
+        "id": str(value.get("id", ""))[:200],
+        "type": property_type,
+        "writable": property_type in NOTION_WRITABLE_TYPES,
+    }
+    configuration = value.get(property_type)
+    if property_type in {"select", "status", "multi_select"} and isinstance(
+        configuration, dict
+    ):
+        compact["options"] = [
+            str(item.get("name", ""))[:100]
+            for item in configuration.get("options", [])[:100]
+            if isinstance(item, dict) and item.get("name")
+        ]
+    if property_type == "relation" and isinstance(configuration, dict):
+        relation_target = configuration.get("data_source_id") or configuration.get(
+            "database_id"
+        )
+        if relation_target:
+            compact["relation_target"] = str(relation_target)[:100]
+    return compact
+
+
+def _compact_notion_page(page: dict[str, Any]) -> dict[str, Any]:
+    properties = page.get("properties")
+    return {
+        "id": str(page.get("id", "")),
+        "url": str(page.get("url", ""))[:2048],
+        "created_time": str(page.get("created_time", ""))[:100],
+        "last_edited_time": str(page.get("last_edited_time", ""))[:100],
+        "properties": {
+            str(name)[:200]: _compact_notion_property(value)
+            for name, value in properties.items()
+        }
+        if isinstance(properties, dict)
+        else {},
+    }
+
+
+def _notion_page_is_allowed(page: dict[str, Any]) -> bool:
+    page_id = _notion_uuid(page.get("id", ""))
+    if page_id == NOTION_MEETINGS_PAGE_ID:
+        return True
+    parent = page.get("parent")
+    return bool(
+        isinstance(parent, dict)
+        and parent.get("type") == "data_source_id"
+        and _notion_uuid(parent.get("data_source_id", ""))
+        in set(NOTION_DATA_SOURCES.values())
+    )
+
+
+def _compact_notion_block(block: dict[str, Any]) -> dict[str, Any]:
+    block_type = str(block.get("type", ""))[:100]
+    data = block.get(block_type)
+    text = _notion_plain_text(data.get("rich_text")) if isinstance(data, dict) else ""
+    return {
+        "id": str(block.get("id", "")),
+        "type": block_type,
+        "text": text,
+        "has_children": bool(block.get("has_children")),
+    }
+
+
+def _notion_fetch_blocks_page(
+    block_id: str, page_size: int, start_cursor: str = ""
+) -> dict[str, Any]:
+    query = f"?page_size={page_size}"
+    if start_cursor:
+        query += "&start_cursor=" + urllib.parse.quote(start_cursor, safe="")
+    payload = _notion_api("GET", f"/blocks/{block_id}/children{query}")
+    blocks = [
+        _compact_notion_block(block)
+        for block in payload.get("results", [])
+        if isinstance(block, dict)
+    ]
+    return {
+        "blocks": blocks,
+        "has_more": bool(payload.get("has_more")),
+        "next_cursor": str(payload.get("next_cursor") or ""),
+    }
+
+
+def call_notion(
+    payload: dict[str, Any],
+    allowed_page_ids: frozenset[str] | None = None,
+    allowed_block_ids: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    (
+        action,
+        data_source_id,
+        page_id,
+        filter_value,
+        sorts,
+        page_size,
+        start_cursor,
+        properties,
+        content,
+        block_id,
+    ) = validate_notion_payload(payload)
+    if action == "get_schema":
+        schema = _notion_api("GET", f"/data_sources/{data_source_id}")
+        schema_properties = schema.get("properties")
+        if not isinstance(schema_properties, dict):
+            raise RuntimeError("Notion data source schema is unavailable")
+        names = sorted(str(name) for name in schema_properties)
+        offset = int(start_cursor or "0")
+        schema_page_size = min(page_size, 10)
+        selected_names = names[offset : offset + schema_page_size]
+        next_offset = offset + len(selected_names)
+        has_more = next_offset < len(names)
+        return _bounded_result(
+            {
+                "id": data_source_id,
+                "title": _notion_plain_text(schema.get("title")),
+                "properties": {
+                    name: _compact_notion_schema_property(schema_properties[name])
+                    for name in selected_names
+                    if isinstance(schema_properties.get(name), dict)
+                },
+                "has_more": has_more,
+                "next_cursor": str(next_offset) if has_more else "",
+            }
+        )
+    if action == "query":
+        body: dict[str, Any] = {"page_size": page_size}
+        if filter_value:
+            body["filter"] = filter_value
+        if sorts:
+            body["sorts"] = sorts
+        if start_cursor:
+            body["start_cursor"] = start_cursor
+        response = _notion_api("POST", f"/data_sources/{data_source_id}/query", body)
+        return _bounded_result(
+            {
+                "results": [
+                    _compact_notion_page(page)
+                    for page in response.get("results", [])
+                    if isinstance(page, dict)
+                ],
+                "has_more": bool(response.get("has_more")),
+                "next_cursor": response.get("next_cursor"),
+            }
+        )
+    if action == "fetch_blocks":
+        if allowed_block_ids is None or block_id not in allowed_block_ids:
+            raise PermissionError(
+                "Notion block must come from an approved page read in this run"
+            )
+        return _bounded_result(
+            _notion_fetch_blocks_page(block_id, page_size, start_cursor)
+        )
+    if action == "fetch_page":
+        if page_id != NOTION_MEETINGS_PAGE_ID and (
+            allowed_page_ids is None or page_id not in allowed_page_ids
+        ):
+            raise PermissionError(
+                "Notion page must come from an approved query in this run"
+            )
+        page = _notion_api("GET", f"/pages/{page_id}")
+        if not _notion_page_is_allowed(page):
+            raise PermissionError("Notion page is outside the approved scope")
+        blocks_page = _notion_fetch_blocks_page(page_id, page_size, start_cursor)
+        return _bounded_result({"page": _compact_notion_page(page), **blocks_page})
+
+    schema = _notion_api("GET", f"/data_sources/{data_source_id}")
+    schema_properties = schema.get("properties")
+    if not isinstance(schema_properties, dict):
+        raise RuntimeError("Notion data source schema is unavailable")
+    normalized = normalize_notion_properties(properties, schema_properties)
+    blocks = markdown_to_notion_blocks(content)
+    create_body: dict[str, Any] = {
+        "parent": {"type": "data_source_id", "data_source_id": data_source_id},
+        "properties": normalized,
+    }
+    if blocks:
+        create_body["children"] = blocks[:100]
+    page = _notion_api("POST", "/pages", create_body)
+    created_id = _notion_uuid(page.get("id", ""))
+    try:
+        for index in range(100, len(blocks), 100):
+            _notion_api(
+                "PATCH",
+                f"/blocks/{created_id}/children",
+                {"children": blocks[index : index + 100]},
+            )
+    except Exception:
+        with contextlib.suppress(Exception):
+            _notion_api("PATCH", f"/pages/{created_id}", {"in_trash": True})
+        raise
+    return _compact_notion_page(page)
+
+
+def call_notion_authorized(
+    registry: RunCapabilityRegistry, token: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    validated = validate_notion_payload(payload)
+    action = validated[0]
+    data_source = str(payload.get("data_source", ""))
+    allowed_pages = registry.notion_known_pages(token)
+    allowed_blocks = registry.notion_known_blocks(token)
+    if action != "create_page":
+        result = call_notion(payload, allowed_pages, allowed_blocks)
+        if action == "query":
+            registry.add_notion_known_pages(
+                token,
+                [
+                    str(page.get("id", ""))
+                    for page in result.get("results", [])
+                    if isinstance(page, dict) and page.get("id")
+                ],
+            )
+        if action in {"fetch_page", "fetch_blocks"}:
+            registry.add_notion_known_blocks(
+                token,
+                [
+                    str(block.get("id", ""))
+                    for block in result.get("blocks", [])
+                    if isinstance(block, dict) and block.get("id")
+                ],
+            )
+        return result
+
+    properties = payload.get("properties")
+    if not isinstance(properties, dict):
+        raise ValueError("properties are required for create_page")
+    if data_source == "discovery_pipeline" and "Problem Signal" in properties:
+        expected = registry.notion_created_page(token, "problem_signal")
+        relation = properties.get("Problem Signal")
+        if (
+            not expected
+            or not isinstance(relation, list)
+            or len(relation) != 1
+            or _notion_uuid(relation[0]) != expected
+        ):
+            raise PermissionError(
+                "Pipeline relation must reference this run's created Problem Signal"
+            )
+
+    registry.reserve_notion_write(token, data_source)
+    try:
+        result = call_notion(payload, allowed_pages, allowed_blocks)
+        registry.commit_notion_write(token, data_source, str(result.get("id", "")))
+        return result
+    except Exception:
+        registry.release_notion_write(token, data_source)
+        raise
+
+
 ASANA_READ_ACTIONS = {
     "get_me",
     "list_projects",
@@ -2256,8 +3079,10 @@ class RuntimeServer:
                     "XAI_API_KEY",
                     "OPENROUTER_API_KEY",
                     "GITHUB_TOKEN",
-                    "DISCOVERY_PUBLIC_BASE_URL",
                     "GITHUB_WRITE_ALLOWED_USER_IDS",
+                    "ASANA_TOKEN",
+                    "NOTION_API_TOKEN",
+                    "DISCOVERY_PUBLIC_BASE_URL",
                 )
                 capabilities_ready = all(
                     os.environ.get(key, "").strip() for key in capability_env
@@ -2279,6 +3104,7 @@ class RuntimeServer:
                     "/internal/perplexity": call_perplexity,
                     "/internal/xai": call_xai,
                     "/internal/github": call_github,
+                    "/internal/notion": call_notion,
                 }
                 if self.path in safe_routes or self.path in {
                     "/internal/openrouter/catalog",
@@ -2295,7 +3121,8 @@ class RuntimeServer:
                         return
                     try:
                         declared = parse_content_length(
-                            self.headers.get("Content-Length"), 65536
+                            self.headers.get("Content-Length"),
+                            200_000 if self.path == "/internal/notion" else 65_536,
                         )
                         raw = self.rfile.read(declared) if declared else b"{}"
                         payload = json.loads(raw.decode("utf-8"))
@@ -2329,7 +3156,11 @@ class RuntimeServer:
                                 outer.run_capabilities.authorize_github_write(
                                     supplied, github_write_digest(payload)
                                 )
-                            if self.path == "/internal/perplexity":
+                            if self.path == "/internal/notion":
+                                result = call_notion_authorized(
+                                    outer.run_capabilities, supplied, payload
+                                )
+                            elif self.path == "/internal/perplexity":
                                 result = call_perplexity(
                                     payload,
                                     continue_allowed=lambda: self._request_active(
