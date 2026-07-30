@@ -464,6 +464,24 @@ class RuntimeContractTests(unittest.TestCase):
                 r.call_notion_authorized(registry, token, payload)
         notion.assert_not_called()
 
+    def test_missing_created_page_id_poisons_same_run_retry(self):
+        r = self.runtime
+        registry = r.RunCapabilityRegistry(ttl=60)
+        token = registry.issue(None, sender_id="owner", notion_write_allowed=True)
+        payload = {
+            "action": "create_page",
+            "data_source": "problem_signal",
+            "properties": {"Problem Statement": "Missing ID"},
+        }
+        schema = {"properties": {"Problem Statement": {"type": "title", "title": {}}}}
+        with patch.object(r, "_notion_api", side_effect=[schema, {}]):
+            with self.assertRaises(r.NotionMutationAmbiguousError):
+                r.call_notion_authorized(registry, token, payload)
+        with patch.object(r, "_notion_api") as api:
+            with self.assertRaises(PermissionError):
+                r.call_notion_authorized(registry, token, payload)
+        api.assert_not_called()
+
     def test_notion_fetch_rejects_unknown_page_before_upstream_read(self):
         r = self.runtime
         with patch.object(r, "_notion_api") as api:
@@ -528,7 +546,7 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_notion_cursors_are_exact_and_oversized_responses_fail_closed(self):
         r = self.runtime
-        opaque = "  opaque+/= token  "
+        opaque = "  " + "sk-" + "abcdefghijklmnop" + "  "
         response = {"results": [], "has_more": True, "next_cursor": opaque}
         with patch.object(r, "_notion_api", return_value=response) as api:
             first = r.call_notion(
@@ -641,9 +659,9 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_notion_schema_is_transport_bounded_with_actionable_pagination(self):
         r = self.runtime
-        options = [{"name": "界" * 100} for _ in range(100)]
+        options = [{"name": "😀" * 100} for _ in range(100)]
         schema = {
-            "title": [{"plain_text": "Large schema"}],
+            "title": [{"plain_text": "😀" * 500}],
             "properties": {
                 f"Property {index:03d}": {
                     "id": f"id-{index}",

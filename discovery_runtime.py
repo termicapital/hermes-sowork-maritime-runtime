@@ -2017,7 +2017,7 @@ NOTION_WRITABLE_TYPES = {
     "files",
 }
 NOTION_CURSOR_MAX = 10_000
-NOTION_SCHEMA_RESULT_MAX = 130_000
+NOTION_SCHEMA_RESULT_MAX = 180_000
 
 
 class NotionMutationAmbiguousError(RuntimeError):
@@ -2373,7 +2373,14 @@ def _notion_api(
                 raise RuntimeError("Notion returned an invalid response")
             return parsed
         except urllib.error.HTTPError as exc:
-            raw = exc.read(4097)
+            try:
+                raw = exc.read(4097)
+            except OSError as read_exc:
+                if not retry_safe and 500 <= exc.code <= 599:
+                    raise NotionMutationAmbiguousError(
+                        "Notion mutation result is ambiguous"
+                    ) from read_exc
+                raw = b""
             code = "request_failed"
             with contextlib.suppress(Exception):
                 parsed_error = json.loads(raw[:4096].decode("utf-8"))
@@ -2551,6 +2558,26 @@ def _notion_response_cursor(payload: dict[str, Any]) -> str:
     return cursor
 
 
+def _bounded_notion_paginated_result(payload: dict[str, Any]) -> dict[str, Any]:
+    cursor = _notion_response_cursor(payload)
+    has_more = bool(payload.get("has_more"))
+    bounded_input = dict(payload)
+    bounded_input["next_cursor"] = ""
+    bounded = _bounded_result(bounded_input)
+    if not isinstance(bounded, dict):
+        raise RuntimeError("Notion returned an invalid paginated response")
+    if bounded.get("truncated"):
+        return {
+            "preview": str(bounded.get("preview", "")),
+            "truncated": True,
+            "has_more": has_more,
+            "next_cursor": cursor,
+        }
+    bounded["has_more"] = has_more
+    bounded["next_cursor"] = cursor
+    return bounded
+
+
 def _notion_fetch_blocks_page(
     block_id: str, page_size: int, start_cursor: str = ""
 ) -> dict[str, Any]:
@@ -2653,7 +2680,7 @@ def call_notion(
         if start_cursor:
             body["start_cursor"] = start_cursor
         response = _notion_api("POST", f"/data_sources/{data_source_id}/query", body)
-        return _bounded_result(
+        return _bounded_notion_paginated_result(
             {
                 "results": [
                     _compact_notion_page(page)
@@ -2669,7 +2696,7 @@ def call_notion(
             raise PermissionError(
                 "Notion block must come from an approved page read in this run"
             )
-        return _bounded_result(
+        return _bounded_notion_paginated_result(
             _notion_fetch_blocks_page(block_id, page_size, start_cursor)
         )
     if action == "fetch_page":
@@ -2683,7 +2710,9 @@ def call_notion(
         if not _notion_page_is_allowed(page):
             raise PermissionError("Notion page is outside the approved scope")
         blocks_page = _notion_fetch_blocks_page(page_id, page_size, start_cursor)
-        return _bounded_result({"page": _compact_notion_page(page), **blocks_page})
+        return _bounded_notion_paginated_result(
+            {"page": _compact_notion_page(page), **blocks_page}
+        )
 
     schema = _notion_api("GET", f"/data_sources/{data_source_id}")
     schema_properties = schema.get("properties")
@@ -2698,7 +2727,12 @@ def call_notion(
     if blocks:
         create_body["children"] = blocks[:100]
     page = _notion_api("POST", "/pages", create_body)
-    created_id = _notion_uuid(page.get("id", ""))
+    try:
+        created_id = _notion_uuid(page.get("id", ""))
+    except (TypeError, ValueError) as exc:
+        raise NotionMutationAmbiguousError(
+            "Notion create returned no usable page identifier"
+        ) from exc
     try:
         for index in range(100, len(blocks), 100):
             _notion_api(
