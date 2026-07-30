@@ -77,10 +77,54 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("Discovery Scout —", prompt)
         self.assertIn("Image URL:", prompt)
         self.assertIn("public HTTPS URL", prompt)
+        self.assertIn("Never include reasoning", prompt)
+        self.assertIn("SoWork-friendly formatting", prompt)
 
     def test_clean_output_removes_session_marker(self):
         raw = "Discovery Scout — ready\n\nsession_id: 20260728_abc"
         self.assertEqual(self.runtime.clean_cli_output(raw), "Discovery Scout — ready")
+
+    def test_clean_output_removes_reasoning_ui_before_final_answer(self):
+        raw = (
+            "Discovery Scout — ┌─ Reasoning ─────────┐\n"
+            "Planning PR inspection\n"
+            "Fetching files\n"
+            "Discovery Scout — PR #1 is open.\n\n"
+            "What changed\n"
+            "- Independent fallback added."
+        )
+        self.assertEqual(
+            self.runtime.clean_cli_output(raw),
+            "Discovery Scout — PR #1 is open.\n\n"
+            "What changed\n"
+            "- Independent fallback added.",
+        )
+
+    def test_clean_output_preserves_later_prefix_mentions_in_final_answer(self):
+        raw = (
+            "Discovery Scout — ┌─ Reasoning ─────────┐\n"
+            "Planning\n"
+            "Discovery Scout — Answer\n"
+            "Quoted label: Discovery Scout — detail"
+        )
+        self.assertEqual(
+            self.runtime.clean_cli_output(raw),
+            "Discovery Scout — Answer\nQuoted label: Discovery Scout — detail",
+        )
+
+    def test_clean_output_fails_closed_when_reasoning_has_no_final_prefix(self):
+        raw = (
+            "Discovery Scout — ┌─ Reasoning ─────────┐\n"
+            "Planning\n"
+            "Unprefixed final answer"
+        )
+        cleaned = self.runtime.clean_cli_output(raw)
+        self.assertEqual(
+            cleaned,
+            "Discovery Scout — I could not produce a clean final response. Please try again.",
+        )
+        self.assertNotIn("Reasoning", cleaned)
+        self.assertNotIn("Planning", cleaned)
 
     def test_split_text_preserves_content(self):
         source = "one two three four five six seven"

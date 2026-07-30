@@ -348,13 +348,22 @@ def build_prompt(target: dict[str, Any], context: str, config: Config) -> str:
 
         For every request that generates, creates, or edits one or more images, the final answer MUST include each generated image's safe public HTTPS URL on its own line in the form "Image URL: https://...". Never return a local path, file:// URL, data URL, or inaccessible internal URL. If the image tool does not provide a public HTTPS URL, do not claim that the image was delivered: retry with an approved public-URL-producing image provider when possible, otherwise state clearly that no deliverable URL was produced.
 
-        Return only the final group-ready answer. Do not send messages yourself. Begin exactly with "{AGENT_PREFIX}". Do not reveal secrets, private memory, unrelated files, or personal correspondence. External writes and actions require Guillermo's explicit approval.
+        Return only the final group-ready answer. Never include reasoning, planning notes, tool-progress text, UI panels, or internal work traces. Use clean SoWork-friendly formatting: short paragraphs, brief labels, and simple hyphen bullets; no box-drawing characters, tables, duplicated headings, or repeated status lines. Do not send messages yourself. Begin exactly once with "{AGENT_PREFIX}". Do not reveal secrets, private memory, unrelated files, or personal correspondence. External writes and actions require Guillermo's explicit approval.
         """
     ).strip()
 
 
 def clean_cli_output(stdout: str) -> str:
     text = SESSION_MARKER_RE.sub("", stdout.strip()).strip()
+    reasoning_start = text.find("┌─ Reasoning")
+    if reasoning_start >= 0:
+        final_start = text.find(AGENT_PREFIX, reasoning_start + len("┌─ Reasoning"))
+        if final_start < 0:
+            return (
+                f"{AGENT_PREFIX} I could not produce a clean final response. "
+                "Please try again."
+            )
+        text = text[final_start:].strip()
     if not text.startswith(AGENT_PREFIX):
         text = f"{AGENT_PREFIX} {text}"
     return text
